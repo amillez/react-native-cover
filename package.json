@@ -1,6 +1,6 @@
 {
     "name": "react-native-cover",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "🔒 Native privacy cover for React Native. Hides your app behind an overlay in the iOS App Switcher and Android Recents screen.",
     "main": "./lib/commonjs/index.js",
     "module": "./lib/module/index.js",
