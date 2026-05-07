@@ -1,0 +1,56 @@
+appId: com.agustinmj.coverexample
+name: Cover paints above an open RN <Modal> Dialog
+---
+# This flow exists because RN's <Modal> renders in a separate top-level
+# Dialog window on Android. A naive cover attached to the activity's main
+# window paints behind the Modal — this test guards against regressing.
+#
+# Verification strategy: while the cover is up, taps at the modal-close
+# button's coordinates must be intercepted by the cover (which sets
+# `setOnTouchListener { _, _ -> true }`). If the cover is correctly above
+# the Modal, the tap is swallowed and the modal stays open. If the cover
+# is below the Modal (the bug we are guarding against), the tap reaches
+# the close button and the modal is dismissed — and the assertion at the
+# end fires.
+
+- launchApp:
+    clearState: false
+
+# Open the modal — `modal-content` lives in the Modal's Dialog window.
+- scrollUntilVisible:
+    element:
+      id: open-modal
+    direction: DOWN
+- tapOn:
+    id: open-modal
+- assertVisible:
+    id: modal-content
+
+# Mount the cover from inside the modal. The example app calls
+# Cover.show() and schedules Cover.hide() after 3 s, so this gives the
+# test a clean window during which the cover must be on top.
+- tapOn:
+    id: modal-show-cover
+
+# While the cover is up, attempt to dismiss the modal by tapping
+# `modal-close`. Maestro finds the node in the accessibility tree (which
+# spans every window) and taps at its on-screen coordinates. If the cover
+# is on top of the Modal, the tap lands on the cover — which absorbs all
+# touches — so the close handler never fires.
+- tapOn:
+    id: modal-close
+
+# Wait long enough for the cover's auto-hide (3 s) plus its fade.
+- waitForAnimationToEnd
+
+# The modal MUST still be visible. If the tap above had reached the
+# close button, the modal would be gone and this assertion would fail —
+# proving the cover was NOT above the modal.
+- assertVisible:
+    id: modal-content
+
+# Sanity check: now that the cover is gone, the close button works.
+- tapOn:
+    id: modal-close
+- assertNotVisible:
+    id: modal-content

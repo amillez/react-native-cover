@@ -1,0 +1,91 @@
+appId: com.agustinmj.coverexample
+name: Color + image combine; setBlur replaces both
+---
+- launchApp:
+    clearState: false
+
+# Start from a known baseline.
+- tapOn:
+    id: color-black
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000"
+
+# Add an image overlay on top of the color background.
+- scrollUntilVisible:
+    element:
+      id: toggle-image
+    direction: DOWN
+- tapOn:
+    id: toggle-image
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/cc/full"
+
+# Change just the color while keeping the image overlay.
+- scrollUntilVisible:
+    element:
+      id: color-indigo
+    direction: UP
+- tapOn:
+    id: color-indigo
+- assertVisible:
+    id: mode-text
+    text: "COLOR #1E1B4B + IMG contain/cc/full"
+
+# Switch to a transparent background — image alone over nothing.
+- tapOn:
+    id: color-transparent
+- assertVisible:
+    id: mode-text
+    text: "COLOR #00000000 + IMG contain/cc/full"
+
+# Remove the image overlay; color persists.
+- scrollUntilVisible:
+    element:
+      id: toggle-image
+    direction: DOWN
+- tapOn:
+    id: toggle-image
+- assertVisible:
+    id: mode-text
+    text: "COLOR #00000000"
+
+# Switch to blur — clears color/image visually but state is kept.
+- scrollUntilVisible:
+    element:
+      id: blur-dark
+    direction: DOWN
+- tapOn:
+    id: blur-dark
+- assertVisible:
+    id: mode-text
+    text: BLUR DARK 0.4
+- tapOn:
+    id: blur-light
+- assertVisible:
+    id: mode-text
+    text: BLUR LIGHT 0.4
+
+# Calling setColor exits blur mode.
+- scrollUntilVisible:
+    element:
+      id: color-black
+    direction: UP
+- tapOn:
+    id: color-black
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000"
+
+# Smoke test the cover.
+- scrollUntilVisible:
+    element:
+      id: show-cover
+    direction: DOWN
+- tapOn:
+    id: show-cover
+- assertVisible: Cover shown
+- tapOn: OK
+- assertVisible:
+    id: status-text

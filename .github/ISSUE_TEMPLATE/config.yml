@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Nitro Modules documentation
+    url: https://nitro.margelo.com/docs
+    about: Questions about Nitro itself (not this module) are best asked in the Nitro repo.

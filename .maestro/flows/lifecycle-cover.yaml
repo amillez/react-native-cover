@@ -1,0 +1,43 @@
+appId: com.agustinmj.coverexample
+name: Cover survives background/foreground cycle without leaking the overlay
+---
+- launchApp:
+    clearState: false
+
+# Arm the cover so the lifecycle observers are attached.
+- runFlow:
+    when:
+      visible:
+        id: status-text
+        text: DISABLED
+    commands:
+      - tapOn:
+          id: toggle-cover
+- assertVisible:
+    id: status-text
+    text: ENABLED
+
+# Send the app to background. iOS adds the cover view in
+# applicationDidEnterBackground; Android adds it from the
+# ACTION_CLOSE_SYSTEM_DIALOGS broadcast (reason=homekey/recentapps),
+# with onActivityStopped as a backup signal.
+- pressKey: Home
+
+# Bring the app back. iOS removes the cover in willEnterForeground;
+# Android removes it on the topmost-host window's focus regain. Maestro
+# may cold-start the app on iOS (in which case state resets to DISABLED)
+# or warm-resume on Android — either way, the React UI must be
+# interactable and the cover overlay must NOT be left over the screen.
+- launchApp
+- waitForAnimationToEnd
+- assertVisible:
+    id: status-text
+- assertNotVisible:
+    id: CoverOverlay
+
+# We must still be able to tap a regular UI control — proves nothing is
+# blocking touches.
+- tapOn:
+    id: color-indigo
+- assertVisible:
+    id: status-text

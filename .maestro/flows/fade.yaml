@@ -1,0 +1,37 @@
+appId: com.agustinmj.coverexample
+name: Fade animation does not break show/hide
+---
+- launchApp:
+    clearState: false
+
+- scrollUntilVisible:
+    element:
+      id: fade-0
+    direction: DOWN
+
+# Switch through all the fade durations.
+- tapOn:
+    id: fade-0
+- assertVisible:
+    id: status-text
+- tapOn:
+    id: fade-200
+- assertVisible:
+    id: status-text
+- tapOn:
+    id: fade-600
+- assertVisible:
+    id: status-text
+
+# With a 600ms fade configured, show then hide via the JS API.
+- scrollUntilVisible:
+    element:
+      id: show-cover
+    direction: DOWN
+- tapOn:
+    id: show-cover
+- assertVisible: Cover shown
+- tapOn: OK
+- waitForAnimationToEnd
+- assertVisible:
+    id: status-text

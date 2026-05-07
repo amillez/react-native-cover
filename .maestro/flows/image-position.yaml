@@ -1,0 +1,107 @@
+appId: com.agustinmj.coverexample
+name: Image resize mode and position pickers update the cover
+---
+- launchApp:
+    clearState: false
+
+# Reset to color black + image overlay.
+- tapOn:
+    id: color-black
+- scrollUntilVisible:
+    element:
+      id: toggle-image
+    direction: DOWN
+- runFlow:
+    when:
+      notVisible:
+        id: mode-text
+        text: "COLOR #000000 + IMG contain/cc/full"
+    commands:
+      - tapOn:
+          id: toggle-image
+
+- scrollUntilVisible:
+    element:
+      id: resize-cover
+    direction: DOWN
+
+# Walk through the resize modes.
+- tapOn:
+    id: resize-cover
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG cover/cc/full"
+- tapOn:
+    id: resize-stretch
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG stretch/cc/full"
+- tapOn:
+    id: resize-center
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG center/cc/full"
+- tapOn:
+    id: resize-contain
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/cc/full"
+
+# Walk through positions.
+- scrollUntilVisible:
+    element:
+      id: posx-left
+    direction: DOWN
+- tapOn:
+    id: posx-left
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/lc/full"
+- tapOn:
+    id: posy-top
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/lt/full"
+- tapOn:
+    id: posx-right
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/rt/full"
+- tapOn:
+    id: posy-bottom
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/rb/full"
+
+# Size: switch to a small box and back to full.
+- scrollUntilVisible:
+    element:
+      id: size-120
+    direction: DOWN
+- tapOn:
+    id: size-120
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/rb/120"
+- tapOn:
+    id: size-240
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/rb/240"
+- tapOn:
+    id: size-0
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000 + IMG contain/rb/full"
+
+# Smoke test the cover.
+- scrollUntilVisible:
+    element:
+      id: show-cover
+    direction: DOWN
+- tapOn:
+    id: show-cover
+- assertVisible: Cover shown
+- tapOn: OK
+- assertVisible:
+    id: status-text

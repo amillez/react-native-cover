@@ -1,0 +1,37 @@
+appId: com.agustinmj.coverexample
+name: Cover toggle and color change
+---
+- launchApp:
+    clearState: false
+
+- assertVisible:
+    id: status-text
+    text: DISABLED
+
+- tapOn:
+    id: toggle-cover
+- assertVisible:
+    id: status-text
+    text: ENABLED
+
+- tapOn:
+    id: color-indigo
+- assertVisible:
+    id: mode-text
+    text: "COLOR #1E1B4B"
+- tapOn:
+    id: color-crimson
+- assertVisible:
+    id: mode-text
+    text: "COLOR #7F1D1D"
+- tapOn:
+    id: color-black
+- assertVisible:
+    id: mode-text
+    text: "COLOR #000000"
+
+- tapOn:
+    id: toggle-cover
+- assertVisible:
+    id: status-text
+    text: DISABLED

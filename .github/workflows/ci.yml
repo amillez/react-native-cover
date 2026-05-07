@@ -1,0 +1,108 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+jobs:
+    lint:
+        name: Typecheck + Nitrogen sync + bob build
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+
+            - name: Install root deps
+              run: npm ci
+
+            - name: Typecheck
+              run: npm run typecheck
+
+            - name: Nitrogen sync
+              run: npm run specs && git diff --exit-code nitrogen/generated
+
+            - name: Build (bob)
+              run: npm run build
+
+    android:
+        name: Android example build
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+
+            - uses: actions/setup-java@v4
+              with:
+                  distribution: temurin
+                  java-version: "17"
+
+            - name: Cache Gradle
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.gradle/caches
+                      ~/.gradle/wrapper
+                  key: gradle-${{ runner.os }}-${{ hashFiles('android/build.gradle', 'android/gradle.properties') }}
+
+            - name: Install root deps
+              run: npm ci
+
+            - name: Install example deps
+              working-directory: example
+              run: npm ci
+
+            - name: Expo prebuild (android)
+              working-directory: example
+              run: npx expo prebuild --platform android --clean --no-install
+
+    ios:
+        name: iOS example build
+        runs-on: macos-26
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+
+            - name: Select Xcode 26
+              run: |
+                  ls /Applications | grep -i '^Xcode' || true
+                  XCODE_APP="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n1)"
+                  if [ -z "$XCODE_APP" ]; then
+                    echo "No Xcode 26.x found on this runner image" >&2
+                    exit 1
+                  fi
+                  echo "Selecting $XCODE_APP"
+                  sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+                  xcodebuild -version
+                  swift --version
+
+            - name: Cache CocoaPods
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/Library/Caches/CocoaPods
+                      example/ios/Pods
+                  key: pods-${{ runner.os }}-${{ hashFiles('Cover.podspec', 'example/package.json') }}
+
+            - name: Install root deps
+              run: npm ci
+
+            - name: Install example deps
+              working-directory: example
+              run: npm ci
+
+            - name: Expo prebuild (ios)
+              working-directory: example
+              run: npx expo prebuild --platform ios --clean --no-install

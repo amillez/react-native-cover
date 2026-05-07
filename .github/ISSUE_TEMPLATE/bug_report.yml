@@ -1,0 +1,121 @@
+name: Bug report
+description: Something is broken in react-native-cover
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please fill in as much detail as you can.
+        A reproducible example app is the fastest path to a fix.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug. What did you do, what did you expect, what happened instead?
+      placeholder: |
+        I called `Cover.enable()` and then sent the app to background. The App Switcher
+        thumbnail still shows the app content instead of the cover overlay.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, deterministic steps. Code snippets and a link to a repro repo are best.
+      placeholder: |
+        1. `npm install react-native-cover react-native-nitro-modules`
+        2. Add `Cover.enable()` on app mount
+        3. Build and launch on iPhone 16 simulator (iOS 18.0)
+        4. Press the home button
+        5. Open the App Switcher
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform(s) affected
+      multiple: true
+      options:
+        - iOS (simulator)
+        - iOS (device)
+        - Android (emulator)
+        - Android (device)
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: "iOS 18.0 / Android 14"
+    validations:
+      required: true
+
+  - type: input
+    id: rn-version
+    attributes:
+      label: React Native version
+      placeholder: "0.81.5"
+    validations:
+      required: true
+
+  - type: input
+    id: nitro-modules-version
+    attributes:
+      label: react-native-nitro-modules version
+      placeholder: "0.35.5"
+    validations:
+      required: true
+
+  - type: input
+    id: cover-version
+    attributes:
+      label: react-native-cover version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - New Architecture (Fabric)
+        - Old Architecture (Bridge)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: framework
+    attributes:
+      label: Project type
+      options:
+        - Bare React Native
+        - Expo (managed with config plugins)
+        - Expo (prebuild / dev client)
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant native / JS logs
+      description: Paste anything useful from `xcrun simctl spawn booted log stream`, `adb logcat`, or Metro.
+      render: shell
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I am running the latest version of `react-native-cover`.
+          required: true
+        - label: I have searched existing issues and this bug is not already reported.
+          required: true
+        - label: I have reproduced the bug in the example app or in a minimal repro.
+          required: false

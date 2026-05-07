@@ -1,0 +1,57 @@
+appId: com.agustinmj.coverexample
+name: Blur intensity picker updates the cover
+---
+- launchApp:
+    clearState: false
+
+# Switch to blur dark first.
+- scrollUntilVisible:
+    element:
+      id: blur-dark
+    direction: DOWN
+- tapOn:
+    id: blur-dark
+- assertVisible:
+    id: mode-text
+    text: BLUR DARK 0.4
+
+# Walk through the four intensities and assert the live mode summary.
+- scrollUntilVisible:
+    element:
+      id: blur-intensity-0.2
+    direction: DOWN
+- tapOn:
+    id: blur-intensity-0.2
+- assertVisible:
+    id: mode-text
+    text: BLUR DARK 0.2
+
+- tapOn:
+    id: blur-intensity-0.7
+- assertVisible:
+    id: mode-text
+    text: BLUR DARK 0.7
+
+- tapOn:
+    id: blur-intensity-1.0
+- assertVisible:
+    id: mode-text
+    text: BLUR DARK 1.0
+
+- tapOn:
+    id: blur-intensity-0.4
+- assertVisible:
+    id: mode-text
+    text: BLUR DARK 0.4
+
+# Smoke test: show + dismiss in current intensity.
+- scrollUntilVisible:
+    element:
+      id: show-cover
+    direction: DOWN
+- tapOn:
+    id: show-cover
+- assertVisible: Cover shown
+- tapOn: OK
+- assertVisible:
+    id: status-text

@@ -1,0 +1,98 @@
+{
+    "name": "react-native-cover",
+    "version": "0.1.1",
+    "description": "🔒 Native privacy cover for React Native. Hides your app behind an overlay in the iOS App Switcher and Android Recents screen.",
+    "main": "./lib/commonjs/index.js",
+    "module": "./lib/module/index.js",
+    "types": "./lib/typescript/src/index.d.ts",
+    "react-native": "src/index",
+    "source": "src/index",
+    "scripts": {
+        "typecheck": "tsc --noEmit",
+        "clean": "git clean -dfX",
+        "build": "npm run typecheck && bob build",
+        "specs": "nitrogen --logLevel=\"debug\"",
+        "codegen": "nitrogen --logLevel=\"debug\" && npm run build",
+        "lint": "biome check .",
+        "lint:fix": "biome check --write .",
+        "format": "biome format --write .",
+        "prepublishOnly": "npm run codegen"
+    },
+    "engines": {
+        "node": ">=22"
+    },
+    "keywords": [
+        "react-native",
+        "privacy",
+        "cover",
+        "app-switcher",
+        "recents",
+        "overlay",
+        "ios",
+        "android"
+    ],
+    "files": [
+        "src",
+        "react-native.config.js",
+        "lib",
+        "nitrogen",
+        "nitro.json",
+        "android/build.gradle",
+        "android/fix-prefab.gradle",
+        "android/gradle.properties",
+        "android/CMakeLists.txt",
+        "android/src",
+        "ios/**/*.h",
+        "ios/**/*.m",
+        "ios/**/*.mm",
+        "ios/**/*.cpp",
+        "ios/**/*.swift",
+        "*.podspec",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/amillez/react-native-cover.git"
+    },
+    "author": "AgustinMJ",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/amillez/react-native-cover/issues"
+    },
+    "homepage": "https://github.com/amillez/react-native-cover#readme",
+    "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org/"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "2.4.14",
+        "@types/react": "19.2.0",
+        "nitrogen": "0.35.6",
+        "react": "19.2.5",
+        "react-native": "0.85.3",
+        "react-native-builder-bob": "^0.40.18",
+        "react-native-nitro-modules": "0.35.6",
+        "typescript": "^5.8.3"
+    },
+    "peerDependencies": {
+        "react": "*",
+        "react-native": "*",
+        "react-native-nitro-modules": "*"
+    },
+    "react-native-builder-bob": {
+        "source": "src",
+        "output": "lib",
+        "targets": [
+            "commonjs",
+            "module",
+            [
+                "typescript",
+                {
+                    "project": "tsconfig.json"
+                }
+            ]
+        ]
+    }
+}

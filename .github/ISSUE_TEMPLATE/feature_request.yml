@@ -1,0 +1,67 @@
+name: Feature request
+description: Suggest a new feature or improvement for react-native-cover
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest a feature!
+        Before opening, please check the README to make sure this is not already supported.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the user-facing problem. Avoid jumping straight to a solution.
+      placeholder: |
+        When my app shows a Face ID prompt, my custom JS-driven cover briefly mounts because
+        AppState transitions to "inactive". I'd like an opt-in to suppress the cover during
+        system-presented modals.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API
+      description: Sketch what the public TypeScript API or behavior change would look like.
+      render: typescript
+      placeholder: |
+        Cover.enable({ ignoreSystemModals: true })
+
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Which platforms does this apply to?
+      multiple: true
+      options:
+        - iOS
+        - Android
+        - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other approaches and why they were not enough.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, related libraries, or links to similar implementations.
+
+  - type: checkboxes
+    id: pre-flight
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues and this feature is not already requested.
+          required: true
+        - label: I am willing to discuss design trade-offs in this issue.
+          required: true
+        - label: I am willing to open a PR (optional, but appreciated).
+          required: false

@@ -1,0 +1,9 @@
+flows:
+  - flows/cover-toggle.yaml
+  - flows/manual-show-hide.yaml
+  - flows/lifecycle-cover.yaml
+  - flows/modal-coverage.yaml
+  - flows/modes.yaml
+  - flows/image-position.yaml
+  - flows/blur-intensity.yaml
+  - flows/fade.yaml

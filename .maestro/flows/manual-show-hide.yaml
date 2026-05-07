@@ -1,0 +1,30 @@
+appId: com.agustinmj.coverexample
+name: Manual show/hide of cover via JS API
+---
+- launchApp:
+    clearState: false
+
+- scrollUntilVisible:
+    element:
+      id: show-cover
+    direction: DOWN
+
+# Tap "Show cover now" — JS calls Cover.show() and presents an alert
+# above the cover. The alert appearing is proof the JS call did not crash.
+- tapOn:
+    id: show-cover
+- assertVisible: Cover shown
+
+# Dismissing the alert calls Cover.hide() in the example app. After
+# that, the React UI must be reachable again — which is only possible if
+# the native cover view has been removed.
+- tapOn: OK
+- waitForAnimationToEnd
+- scrollUntilVisible:
+    element:
+      id: color-black
+    direction: UP
+- tapOn:
+    id: color-black
+- assertVisible:
+    id: status-text
