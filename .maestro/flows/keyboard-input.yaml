@@ -1,0 +1,83 @@
+appId: com.agustinmj.coverexample
+name: Keyboard input still works while the cover is enabled
+tags:
+  - android
+---
+# Regression for an Android-only bug: with the cover enabled, the
+# pre-mounted overlay panel (TYPE_APPLICATION_PANEL, FLAG_NOT_FOCUSABLE,
+# FLAG_NOT_TOUCHABLE while invisible) is supposed to be inert with
+# respect to input. In practice we observed that enabling the cover
+# prevents the soft keyboard from delivering keystrokes to a focused
+# RN <TextInput> below it.
+#
+# This flow enables the cover, focuses the input, types, and asserts
+# that what we typed is actually echoed back. If the bug is present,
+# `text-input-value` stays "(empty)" or is missing the typed string,
+# and the final assertion fails.
+
+- launchApp:
+    clearState: false
+
+# Make sure the cover is enabled — this is the precondition that
+# triggers the bug. `runFlow.when` keeps the test idempotent across
+# Android (warm resume preserves state) and iOS (cold relaunch
+# resets to DISABLED) so the same flow works on both platforms.
+- assertVisible:
+    id: status-text
+- runFlow:
+    when:
+      visible:
+        id: status-text
+        text: DISABLED
+    commands:
+      - tapOn:
+          id: toggle-cover
+- assertVisible:
+    id: status-text
+    text: ENABLED
+
+# Bring the input into view and start with a known-empty state.
+- scrollUntilVisible:
+    element:
+      id: text-input
+    direction: DOWN
+- assertVisible:
+    id: text-input-value
+    text: "(empty)"
+
+# Focus the input. With the cover enabled and (correctly) untouchable
+# while invisible, this tap must reach the TextInput underneath.
+- tapOn:
+    id: text-input
+
+# `inputText` drives the soft keyboard / IME. On Android this is the
+# step that fails today: the pre-mounted overlay panel interferes with
+# IME dispatch and no characters are delivered to the focused input.
+- inputText: "hello"
+
+# Dismiss the soft keyboard so the echoed value moves back into the
+# visible viewport. Maestro's `assertVisible` requires on-screen
+# presence, and on small phones the value text sits where the keyboard
+# was painted.
+- hideKeyboard
+
+# The example app echoes the live value to `text-input-value`. If the
+# keyboard worked, this assertion passes; if the bug is present, it
+# still reads "(empty)" and the flow fails here — which is exactly
+# what we want this regression test to catch.
+- assertVisible:
+    id: text-input-value
+    text: "hello"
+
+# Cleanup so reruns of this flow start from a known state. Scroll back
+# up first — the input was at the bottom of the form, and `toggle-cover`
+# is near the top.
+- scrollUntilVisible:
+    element:
+      id: toggle-cover
+    direction: UP
+- tapOn:
+    id: toggle-cover
+- assertVisible:
+    id: status-text
+    text: DISABLED

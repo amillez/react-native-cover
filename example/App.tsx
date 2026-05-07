@@ -8,6 +8,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { Cover } from "react-native-cover";
@@ -76,6 +77,7 @@ export default function App() {
   const [blurIntensity, setBlurIntensity] = useState<number>(0.4);
   const [fade, setFade] = useState<number>(FADE_DURATIONS[1].value);
   const [modalVisible, setModalVisible] = useState<boolean>(false);
+  const [keyboardText, setKeyboardText] = useState<string>("");
 
   useEffect(() => {
     Cover.setFade(fade);
@@ -435,6 +437,27 @@ export default function App() {
           </Pressable>
         </View>
 
+        {/* Keyboard input regression: with cover enabled on Android, the
+            pre-mounted (invisible) overlay panel must not interfere with
+            IME delivery to the underlying TextInput. Echoes the live
+            value to a Text node so e2e can assert keystrokes landed. */}
+        <Text style={styles.section}>Keyboard input (e2e)</Text>
+        <TextInput
+          testID="text-input"
+          value={keyboardText}
+          onChangeText={setKeyboardText}
+          placeholder="Type here"
+          autoCorrect={false}
+          autoCapitalize="none"
+          style={styles.textInput}
+        />
+        <View style={styles.row}>
+          <Text style={styles.label}>Typed</Text>
+          <Text testID="text-input-value" style={styles.value}>
+            {keyboardText.length === 0 ? "(empty)" : keyboardText}
+          </Text>
+        </View>
+
         <Text style={styles.section}>Modal coverage (e2e)</Text>
         <Pressable
           testID="open-modal"
@@ -608,6 +631,16 @@ const styles = StyleSheet.create({
   posCol: { flex: 1, gap: 6 },
   posLabel: { fontSize: 11, color: "#9CA3AF", textAlign: "center" },
   manualRow: { flexDirection: "row", gap: 8 },
+  textInput: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#D1D5DB",
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: "#111827",
+  },
   hint: { fontSize: 13, color: "#6B7280", marginTop: 12, lineHeight: 18 },
   modalRoot: {
     flex: 1,

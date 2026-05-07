@@ -7,3 +7,4 @@ flows:
   - flows/image-position.yaml
   - flows/blur-intensity.yaml
   - flows/fade.yaml
+  - flows/keyboard-input.yaml

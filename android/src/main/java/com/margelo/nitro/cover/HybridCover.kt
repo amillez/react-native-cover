@@ -422,7 +422,19 @@ class HybridCover : HybridCoverSpec() {
       // While invisible, the panel must let touches fall through to
       // the activity. FLAG_NOT_TOUCHABLE achieves that without
       // needing to remove the panel.
-      flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+      //
+      // FLAG_ALT_FOCUSABLE_IM, combined with FLAG_NOT_FOCUSABLE,
+      // inverts the panel's relationship with the IME: it tells
+      // WindowManager to place the panel BEHIND the soft keyboard
+      // instead of over it. Without this, the pre-mounted fullscreen
+      // panel sits above the IME's window and intercepts the IME's
+      // hit-testing for the focused TextInput beneath, so keystrokes
+      // never reach the input. We only want this while invisible —
+      // when the cover actually paints (background entry / Cover.show)
+      // it must still cover the entire screen including any
+      // lingering IME.
+      flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+        WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
     }
     val params = WindowManager.LayoutParams(
       WindowManager.LayoutParams.MATCH_PARENT,
@@ -531,9 +543,17 @@ class HybridCover : HybridCoverSpec() {
       view.alpha = target
     }
 
-    val flagBit = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-    val newFlags = if (visible) params.flags and flagBit.inv()
-                   else params.flags or flagBit
+    // Toggle FLAG_NOT_TOUCHABLE (touch passthrough while invisible) and
+    // FLAG_ALT_FOCUSABLE_IM together. The IM-flip is what lets the soft
+    // keyboard reach the underlying TextInput while the cover is
+    // pre-mounted invisible — without it, the panel sits above the
+    // IME and swallows hit-testing for the focused input. When the
+    // cover becomes visible we must clear FLAG_ALT_FOCUSABLE_IM again
+    // so the cover keeps painting over any lingering IME.
+    val invisibleFlags = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+      WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+    val newFlags = if (visible) params.flags and invisibleFlags.inv()
+                   else params.flags or invisibleFlags
     if (newFlags != params.flags) {
       params.flags = newFlags
       try {
