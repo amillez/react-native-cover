@@ -49,7 +49,11 @@ internal object CoverWindowAttachment {
   @Volatile private var cachedMViewsField: Field? = null
   @Volatile private var reflectionInitFailed: Boolean = false
 
-  fun topmostHostViewFor(activity: Activity, exclude: View? = null): View? {
+  fun topmostHostViewFor(
+    activity: Activity,
+    exclude: View? = null,
+    exclude2: View? = null,
+  ): View? {
     val views = readWindowManagerViews() ?: return null
     // Iterate in reverse: in WindowManagerGlobal the last entry is
     // the most recently attached, and on a single-activity stack
@@ -57,6 +61,7 @@ internal object CoverWindowAttachment {
     for (i in views.indices.reversed()) {
       val v = views[i]
       if (v === exclude) continue
+      if (v === exclude2) continue
       if (v.windowToken == null) continue
       // Reject views that have been detached from their ViewRootImpl
       // but are still lingering in mViews (mDyingViews entries — see

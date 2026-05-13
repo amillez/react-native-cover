@@ -23,13 +23,32 @@ internal object CoverBlurRenderer {
   /// one is open) at 1/4 scale, blur it via `RenderEffect`, and apply
   /// to the target ImageView. Falls back to a flat tinted background
   /// on API < 31. No-op when the source view has no laid-out size.
-  fun render(target: ImageView, activity: Activity, style: CoverBlurStyle, intensity: Float) {
+  ///
+  /// `alsoExclude` is the cover's WindowManager-attached root view —
+  /// distinct from `target.rootView` on the SCVH path, where the
+  /// SCVH-hosted FrameLayout (containing `target`) is NOT in
+  /// `WindowManagerGlobal.mViews`, but the wrapping `SurfaceView`
+  /// is. Without this exclude the blur source resolves to that
+  /// SurfaceView, and software-drawing a SurfaceView produces a
+  /// transparent bitmap (its content lives in a separate hardware
+  /// surface) — leaving the blur cover translucent and the activity
+  /// content visible through it.
+  fun render(
+    target: ImageView,
+    activity: Activity,
+    style: CoverBlurStyle,
+    intensity: Float,
+    alsoExclude: View? = null,
+  ) {
     // Capturing the activity's decor alone would blur only what's
     // behind the modal, leaving the modal's content sharp under our
     // cover. Using the topmost host view fixes that. Falls back to the
     // activity decor when nothing else is in front.
-    val source = CoverWindowAttachment.topmostHostViewFor(activity, exclude = target.rootView)
-      ?: activity.window?.decorView ?: return
+    val source = CoverWindowAttachment.topmostHostViewFor(
+      activity,
+      exclude = target.rootView,
+      exclude2 = alsoExclude,
+    ) ?: activity.window?.decorView ?: return
     // 1/4 scale: cuts the bitmap allocation 16× and the GPU upscale on
     // display is hidden behind the blur.
     val bitmap = captureViewBitmap(source, scale = 0.25f) ?: return
