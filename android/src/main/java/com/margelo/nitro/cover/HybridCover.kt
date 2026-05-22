@@ -214,6 +214,36 @@ class HybridCover : HybridCoverSpec() {
   @Volatile
   private var scvhSurfaceControl: SurfaceControl? = null
 
+  /// Process-scoped "SCVH is known broken on this device" latch.
+  ///
+  /// Set to true the moment ANY step of `tryAttachCoverViaScvh` fails
+  /// (ctor, setView, null surfacePackage, initial setAlpha,
+  /// setChildSurfacePackage, or addView). Once set, every future call
+  /// short-circuits and falls straight to the legacy non-SCVH attach.
+  ///
+  /// Belt-and-suspenders alongside `safeReleaseScvh` and
+  /// `unscheduleScvhTraversals`: those handle the *synchronous* and
+  /// *Choreographer-queued* lifecycle exceptions respectively. The
+  /// latch is the third layer — if the reflective traversal cancel
+  /// silently no-ops on some future Android version we haven't tested,
+  /// repeated SCVH attempts would each queue another orphan
+  /// `TraversalRunnable` and each could crash from `Looper.loop`. The
+  /// latch caps the total queued-crash exposure to the FIRST failed
+  /// attempt; every subsequent `enable()` / `ensureCoverOnTopmost` /
+  /// reparent goes straight to the legacy path.
+  ///
+  /// Never reset — same process, same Android version, same broken
+  /// SCVH. `disable()` doesn't clear it for the same reason.
+  @Volatile
+  private var scvhDisabled: Boolean = false
+
+  /// Cached reflection handles for `unscheduleScvhTraversals`. Lazy-
+  /// initialised on first use; `scvhReflectionDisabled` latches true if
+  /// the lookup fails so subsequent calls don't keep retrying.
+  @Volatile private var cachedScvhViewRootField: java.lang.reflect.Field? = null
+  @Volatile private var cachedUnscheduleMethod: java.lang.reflect.Method? = null
+  @Volatile private var scvhReflectionDisabled: Boolean = false
+
   /// The cover content view (FrameLayout with current color / image /
   /// blur state). On API 30+ this is hosted in `scvhHost` and rendered
   /// into the SCVH's surface (separate from `coverView`'s window). On
@@ -735,6 +765,10 @@ class HybridCover : HybridCoverSpec() {
     visible: Boolean,
     animated: Boolean,
   ): Boolean {
+    // Short-circuit if a previous attempt this process already proved
+    // SCVH is broken on this device. See `scvhDisabled` doc above.
+    if (scvhDisabled) return false
+
     val displayMetrics = activity.resources.displayMetrics
     val width = displayMetrics.widthPixels
     val height = displayMetrics.heightPixels
@@ -746,20 +780,23 @@ class HybridCover : HybridCoverSpec() {
     val host = try {
       SurfaceControlViewHost(activity, display, null as IBinder?)
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: SurfaceControlViewHost ctor failed (${e.javaClass.simpleName}): ${e.message}")
+      Log.w(TAG, "attachCover scvh: SurfaceControlViewHost ctor failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
+      scvhDisabled = true
       return false
     }
     try {
       host.setView(content, width, height)
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: setView failed (${e.javaClass.simpleName}): ${e.message}")
+      Log.w(TAG, "attachCover scvh: setView failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
+      scvhDisabled = true
       safeReleaseScvh(host)
       return false
     }
 
     val pkg = host.surfacePackage
     if (pkg == null) {
-      Log.w(TAG, "attachCover scvh: surfacePackage is null")
+      Log.w(TAG, "attachCover scvh: surfacePackage is null; disabling SCVH for this session")
+      scvhDisabled = true
       safeReleaseScvh(host)
       return false
     }
@@ -774,7 +811,8 @@ class HybridCover : HybridCoverSpec() {
         .setAlpha(sc, if (visible) 1f else 0f)
         .apply()
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: initial setAlpha failed (${e.javaClass.simpleName}): ${e.message}")
+      Log.w(TAG, "attachCover scvh: initial setAlpha failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
+      scvhDisabled = true
       safeReleaseScvh(host)
       return false
     }
@@ -790,7 +828,8 @@ class HybridCover : HybridCoverSpec() {
       try {
         setChildSurfacePackage(pkg)
       } catch (e: Throwable) {
-        Log.w(TAG, "attachCover scvh: setChildSurfacePackage failed (${e.javaClass.simpleName}): ${e.message}")
+        Log.w(TAG, "attachCover scvh: setChildSurfacePackage failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
+        scvhDisabled = true
         safeReleaseScvh(host)
         return false
       }
@@ -801,7 +840,8 @@ class HybridCover : HybridCoverSpec() {
     try {
       activity.windowManager.addView(surfaceView, params)
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: addView failed (${e.javaClass.simpleName}): ${e.message}")
+      Log.w(TAG, "attachCover scvh: addView failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
+      scvhDisabled = true
       safeReleaseScvh(host)
       return false
     }
@@ -841,6 +881,27 @@ class HybridCover : HybridCoverSpec() {
   /// caller fall through to the legacy non-SCVH attach instead of
   /// crashing.
   private fun safeReleaseScvh(host: SurfaceControlViewHost) {
+    // Cancel any pending Choreographer TraversalRunnable on the SCVH's
+    // internal `ViewRootImpl` BEFORE we release the windowless window
+    // token. Otherwise the queued traversal can fire on the next vsync
+    // and call `WindowlessWindowManager.relayout`, which finds the
+    // token gone (we just removed it via release()) and throws
+    //
+    //   IllegalArgumentException: Invalid window token (never added or
+    //   removed already)
+    //     at WindowlessWindowManager.relayout
+    //     at ViewRootImpl.relayoutWindow
+    //     at ViewRootImpl.performTraversals
+    //     at ViewRootImpl$TraversalRunnable.run
+    //     at Choreographer$CallbackRecord.run
+    //     at Looper.loop
+    //
+    // The TraversalRunnable is in the Choreographer queue, rooted in
+    // `Looper.loop` — outside any try/catch of ours — so by the time it
+    // throws, our chance to swallow the exception is gone. Cancelling
+    // pre-release stops it from being dispatched at all.
+    unscheduleScvhTraversals(host)
+
     try {
       host.release()
     } catch (e: Throwable) {
@@ -848,6 +909,72 @@ class HybridCover : HybridCoverSpec() {
       // host may be partially constructed or already invalidated; the
       // process must not die because cleanup failed.
       Log.w(TAG, "safeReleaseScvh: release failed (${e.javaClass.simpleName}): ${e.message}")
+    }
+  }
+
+  /// Reflectively cancel any pending traversals on the SCVH's internal
+  /// `ViewRootImpl`. Hidden-API path — both the SCVH field that holds
+  /// the `ViewRootImpl` and the `ViewRootImpl.unscheduleTraversals()`
+  /// method are `@hide`. Field naming has not been stable across
+  /// Android versions (Android 16 renamed `mViewRoot` to something
+  /// else), so we don't hard-code the field name. Instead we enumerate
+  /// every reference-typed declared field on SCVH, get its value, and
+  /// probe for an `unscheduleTraversals()` method on it — that method
+  /// is unique to `ViewRootImpl` so the type identification is
+  /// trivially safe.
+  ///
+  /// Cached after first successful probe; latches off
+  /// (`scvhReflectionDisabled = true`) on any failure or
+  /// hidden-API block so subsequent calls don't keep retrying.
+  /// Best-effort on every failure — the caller's release path is
+  /// unaffected.
+  private fun unscheduleScvhTraversals(host: SurfaceControlViewHost) {
+    if (scvhReflectionDisabled) return
+    try {
+      val unschedule = cachedUnscheduleMethod
+      val viewRootField = cachedScvhViewRootField
+      if (unschedule != null && viewRootField != null) {
+        val viewRoot = viewRootField.get(host) ?: return
+        unschedule.invoke(viewRoot)
+        return
+      }
+
+      // First-call probe: find the field on SCVH whose runtime value
+      // exposes `unscheduleTraversals` (i.e. is a `ViewRootImpl`).
+      var found = false
+      for (field in SurfaceControlViewHost::class.java.declaredFields) {
+        if (field.type.isPrimitive) continue
+        if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+        try {
+          field.isAccessible = true
+          val value = field.get(host) ?: continue
+          val method = try {
+            value.javaClass.getDeclaredMethod("unscheduleTraversals")
+          } catch (_: NoSuchMethodException) {
+            try {
+              value.javaClass.getMethod("unscheduleTraversals")
+            } catch (_: NoSuchMethodException) {
+              continue
+            }
+          }
+          method.isAccessible = true
+          method.invoke(value)
+          cachedScvhViewRootField = field
+          cachedUnscheduleMethod = method
+          found = true
+          break
+        } catch (_: Throwable) {
+          // Field reflection blocked or value not what we want; keep probing.
+          continue
+        }
+      }
+      if (!found) {
+        Log.w(TAG, "unscheduleScvhTraversals: no ViewRootImpl field found on SurfaceControlViewHost; disabling reflection")
+        scvhReflectionDisabled = true
+      }
+    } catch (e: Throwable) {
+      Log.w(TAG, "unscheduleScvhTraversals: reflection failed (${e.javaClass.simpleName}): ${e.message}")
+      scvhReflectionDisabled = true
     }
   }
 
