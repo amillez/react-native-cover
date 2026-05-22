@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4 - 2026-05-22
+
+-   Android: fix process crash in the SCVH attach recovery path. When `SurfaceControlViewHost.setView()` (or one of the follow-up steps in `tryAttachCoverViaScvh`) failed, the recovery `host.release()` propagated a framework NPE. `ViewRootImpl$InputStage.onDetachedFromWindow()` on a null head, because the SCVH's input stage chain hadn't been wired up yet. All five recovery `release()` calls plus the teardown release in `detachCoverView` now go through a `safeReleaseScvh` helper that swallows the framework exception, so the legacy non-SCVH attach path actually runs as the intended fallback. Recovery log lines also now include the exception class name.
+
 ## 0.1.3 - 2026-05-13
 
 -   Android: fix the Recents thumbnail race that intermittently leaked the underlying app content — especially under load or with a `<Modal>` open. On API 30+, the cover content is now hosted in a `SurfaceControlViewHost` and visibility is toggled via `SurfaceControl.Transaction.setAlpha` straight from the broadcast HandlerThread, bypassing the View → `ViewRootImpl` → compose chain that was losing the race. Closes [#1](https://github.com/amillez/react-native-cover/issues/1).
