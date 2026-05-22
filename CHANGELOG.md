@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5 - 2026-05-22
+
+-   Android: cancel pending Choreographer traversals on the SCVH's internal `ViewRootImpl` before every release. Without this, a `TraversalRunnable` queued by the partial `setView` could fire after the windowless window token was removed, throwing `IllegalArgumentException: Invalid window token (never added or removed already)` from `WindowlessWindowManager.relayout` on a later vsync, outside any try/catch of ours because the runnable is dispatched from `Looper.loop`. Implemented as a reflective call to `ViewRootImpl.unscheduleTraversals()` via a field probe (the SCVH field name has not been stable across Android versions); on reflection failure the helper latches off so subsequent calls don't keep retrying.
+-   Android: latch SCVH as "known-bad" for the rest of the process on the first failure of any step in `tryAttachCoverViaScvh` (ctor, setView, null surfacePackage, initial setAlpha, setChildSurfacePackage, addView). Belt-and-suspenders alongside the unschedule helper: if the reflective traversal cancel silently no-ops on a future Android version, the latch caps the orphaned-traversal blast radius to exactly one queued crash per process — subsequent attempts go straight to the legacy non-SCVH attach path.
+
 ## 0.1.4 - 2026-05-22
 
 -   Android: fix process crash in the SCVH attach recovery path. When `SurfaceControlViewHost.setView()` (or one of the follow-up steps in `tryAttachCoverViaScvh`) failed, the recovery `host.release()` propagated a framework NPE. `ViewRootImpl$InputStage.onDetachedFromWindow()` on a null head, because the SCVH's input stage chain hadn't been wired up yet. All five recovery `release()` calls plus the teardown release in `detachCoverView` now go through a `safeReleaseScvh` helper that swallows the framework exception, so the legacy non-SCVH attach path actually runs as the intended fallback. Recovery log lines also now include the exception class name.
