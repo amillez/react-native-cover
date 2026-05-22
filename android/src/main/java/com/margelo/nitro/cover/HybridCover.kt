@@ -746,21 +746,21 @@ class HybridCover : HybridCoverSpec() {
     val host = try {
       SurfaceControlViewHost(activity, display, null as IBinder?)
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: SurfaceControlViewHost ctor failed: $e")
+      Log.w(TAG, "attachCover scvh: SurfaceControlViewHost ctor failed (${e.javaClass.simpleName}): ${e.message}")
       return false
     }
     try {
       host.setView(content, width, height)
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: setView failed: $e")
-      host.release()
+      Log.w(TAG, "attachCover scvh: setView failed (${e.javaClass.simpleName}): ${e.message}")
+      safeReleaseScvh(host)
       return false
     }
 
     val pkg = host.surfacePackage
     if (pkg == null) {
       Log.w(TAG, "attachCover scvh: surfacePackage is null")
-      host.release()
+      safeReleaseScvh(host)
       return false
     }
     val sc = pkg.surfaceControl
@@ -774,8 +774,8 @@ class HybridCover : HybridCoverSpec() {
         .setAlpha(sc, if (visible) 1f else 0f)
         .apply()
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: initial setAlpha failed: $e")
-      host.release()
+      Log.w(TAG, "attachCover scvh: initial setAlpha failed (${e.javaClass.simpleName}): ${e.message}")
+      safeReleaseScvh(host)
       return false
     }
 
@@ -790,8 +790,8 @@ class HybridCover : HybridCoverSpec() {
       try {
         setChildSurfacePackage(pkg)
       } catch (e: Throwable) {
-        Log.w(TAG, "attachCover scvh: setChildSurfacePackage failed: $e")
-        host.release()
+        Log.w(TAG, "attachCover scvh: setChildSurfacePackage failed (${e.javaClass.simpleName}): ${e.message}")
+        safeReleaseScvh(host)
         return false
       }
     }
@@ -801,8 +801,8 @@ class HybridCover : HybridCoverSpec() {
     try {
       activity.windowManager.addView(surfaceView, params)
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: addView failed: $e")
-      host.release()
+      Log.w(TAG, "attachCover scvh: addView failed (${e.javaClass.simpleName}): ${e.message}")
+      safeReleaseScvh(host)
       return false
     }
 
@@ -815,6 +815,40 @@ class HybridCover : HybridCoverSpec() {
     if (visible) isVisible = true
     Log.i(TAG, "attachCover scvh: attached size=${width}x${height} visible=$visible sc=ok")
     return true
+  }
+
+  /// Best-effort `SurfaceControlViewHost.release()` that swallows ALL
+  /// exceptions.
+  ///
+  /// Why this exists: `SurfaceControlViewHost.release()` internally calls
+  /// `ViewRootImpl.die() → doDie() → dispatchDetachedFromWindow()`, which
+  /// walks the input-stage chain (`mFirstInputStage`). On a SCVH where
+  /// `setView()` threw *before* the input stages were wired up — or on
+  /// some OEM Android 11–13 builds even after a successful attach — that
+  /// chain head is null and the walk dereferences it, raising a framework
+  /// NPE:
+  ///
+  ///   NullPointerException: ... ViewRootImpl$InputStage.onDetachedFromWindow()
+  ///   at ViewRootImpl.dispatchDetachedFromWindow
+  ///   at ViewRootImpl.doDie
+  ///   at SurfaceControlViewHost.release
+  ///
+  /// Before this helper, that NPE escaped the `catch (e: Throwable)` in
+  /// the recovery paths of `tryAttachCoverViaScvh` (because we re-threw
+  /// by calling `release()` from inside the catch) and killed the process
+  /// on devices where `setView()` happened to fail. Routing every release
+  /// through this helper keeps the recovery path quiet and lets the
+  /// caller fall through to the legacy non-SCVH attach instead of
+  /// crashing.
+  private fun safeReleaseScvh(host: SurfaceControlViewHost) {
+    try {
+      host.release()
+    } catch (e: Throwable) {
+      // Includes the framework NPE described above. Best-effort: the
+      // host may be partially constructed or already invalidated; the
+      // process must not die because cleanup failed.
+      Log.w(TAG, "safeReleaseScvh: release failed (${e.javaClass.simpleName}): ${e.message}")
+    }
   }
 
   /// Shared LayoutParams builder for the cover Window. Used by both
@@ -1109,13 +1143,7 @@ class HybridCover : HybridCoverSpec() {
     // Release the SCVH host AFTER removeView. SCVH's SurfacePackage
     // was reparented into the SurfaceView, which is now detached, so
     // it's safe to tear down the host and let SF reclaim the SC.
-    scvhHost?.let { host ->
-      try {
-        host.release()
-      } catch (_: Throwable) {
-        // Best-effort; host may already be invalidated.
-      }
-    }
+    scvhHost?.let { host -> safeReleaseScvh(host) }
     scvhHost = null
     scvhSurfaceControl = null
     scvhAlphaState = 0f
