@@ -91,7 +91,7 @@ private data class ImageConfig(
 /// The freeze is one-way per view instance: once a cover content view
 /// is being torn down, it's discarded. `attachCover` always builds a
 /// fresh container, so a future show() starts from `frozen = false`.
-private class FreezableFrameLayout(context: Context) : FrameLayout(context) {
+internal class FreezableFrameLayout(context: Context) : FrameLayout(context) {
   @Volatile var frozen: Boolean = false
 
   override fun requestLayout() {
