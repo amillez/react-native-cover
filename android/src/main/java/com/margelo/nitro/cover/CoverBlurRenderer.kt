@@ -18,6 +18,19 @@ internal const val BLUR_VIEW_TAG = "CoverBlurView"
 /// scale (radius is in source pixels).
 private const val BLUR_MAX_RADIUS = 50f
 
+/// Capture scale for the GPU-blur path (API >= S). 1/4 in each
+/// dimension cuts allocation 16× and the upscale on display is hidden
+/// inside the `RenderEffect` blur.
+private const val GPU_BLUR_CAPTURE_SCALE = 0.25f
+
+/// Capture scale for the API < S downscale-upscale fallback. Much
+/// smaller — 1/12 in each dimension (so 1/144 pixels) — because
+/// there's no GPU blur to mask the upscaled blockiness. The bilinear
+/// filter applied at draw time produces a smudge that approximates
+/// the iOS UIBlurEffect look well enough to keep underlying app
+/// content unreadable, even when the style tint is light.
+private const val FALLBACK_BLUR_CAPTURE_SCALE = 0.083f
+
 internal object CoverBlurRenderer {
   /// Capture the topmost host view (e.g. a Modal Dialog's decor when
   /// one is open) at 1/4 scale, blur it via `RenderEffect`, and apply
@@ -49,17 +62,42 @@ internal object CoverBlurRenderer {
       exclude = target.rootView,
       exclude2 = alsoExclude,
     ) ?: activity.window?.decorView ?: return
-    // 1/4 scale: cuts the bitmap allocation 16× and the GPU upscale on
-    // display is hidden behind the blur.
-    val bitmap = captureViewBitmap(source, scale = 0.25f) ?: return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      // API >= S: real GPU blur via RenderEffect. Capture at 1/4 — the
+      // RenderEffect upscale hides any pixelation.
+      val bitmap = captureViewBitmap(source, scale = GPU_BLUR_CAPTURE_SCALE) ?: return
       target.setImageBitmap(bitmap)
       applyRenderEffect(target, intensity)
       val tint = style.tintColor()
       target.foreground = if (tint != Color.TRANSPARENT) ColorDrawable(tint) else null
     } else {
-      target.setImageDrawable(null)
-      target.setBackgroundColor(style.fallbackColor())
+      // API < S (Android 11 and below): RenderEffect doesn't exist.
+      // The old fallback dropped the bitmap and painted a flat
+      // semi-transparent tint, which left the underlying app fully
+      // readable through ~20% transparency — broken privacy for any
+      // host that runs on Android 11. Instead, capture VERY small
+      // (1/144 pixels) and let ImageView's bilinear filter smudge it
+      // back to full size during draw. That gives a frosted-glass
+      // approximation good enough to obscure text while keeping the
+      // colour palette of the underlying content (so the cover doesn't
+      // jump abruptly from "app" to "flat block of colour"). Tint and
+      // intensity then layer on top exactly like the API >= S path,
+      // so the visual contract across versions is consistent.
+      val bitmap = captureViewBitmap(source, scale = FALLBACK_BLUR_CAPTURE_SCALE)
+      if (bitmap != null) {
+        target.setImageBitmap(bitmap)
+        val tint = style.tintColor()
+        target.foreground = if (tint != Color.TRANSPARENT) ColorDrawable(tint) else null
+        target.setBackgroundColor(Color.TRANSPARENT)
+      } else {
+        // Source view had no laid-out size (rare; e.g. first frame
+        // before measure). Fall back to the original flat tint so the
+        // privacy cover still hides content, just without the
+        // smudged-content look.
+        target.setImageDrawable(null)
+        target.foreground = null
+        target.setBackgroundColor(style.fallbackColor())
+      }
     }
   }
 
