@@ -564,7 +564,22 @@ class HybridCover : HybridCoverSpec() {
     val decor = activity.window?.decorView ?: return
     if (decor.windowToken == null) return
 
-    val topmost = CoverWindowAttachment.topmostHostViewFor(activity, exclude = coverView) ?: decor
+    // Exclude both the cover Window's root (`coverView` — SurfaceView
+    // on SCVH path, FrameLayout on legacy) AND the SCVH-hosted content
+    // (`coverContent`). On some OEM builds (Samsung One UI on Android
+    // 14, observed on the Galaxy A05 / SM-A057F) the SCVH's content
+    // view appears in `WindowManagerGlobal.mViews` even though it
+    // lives inside the SCVH's own ViewRootImpl. Without excluding it
+    // the host walk picks our own content view as the "topmost", we
+    // then try to attach the cover as a sub-window of itself, and
+    // `addView` throws `BadTokenException: Unable to add window —
+    // token … is not valid; is your activity running?`. The cover
+    // never appears in the Recents thumbnail on those devices.
+    val topmost = CoverWindowAttachment.topmostHostViewFor(
+      activity,
+      exclude = coverView,
+      exclude2 = coverContent,
+    ) ?: decor
     val targetToken = topmost.windowToken ?: decor.windowToken!!
 
     val current = coverView
@@ -639,7 +654,22 @@ class HybridCover : HybridCoverSpec() {
     // live: while a Dialog is in front, the activity decor's window
     // never sees the focus regain that signals "user came back via
     // Recents tap" — but the Dialog's decor does.
-    val topmost = CoverWindowAttachment.topmostHostViewFor(activity, exclude = coverView) ?: decor
+    // Exclude both the cover Window's root (`coverView` — SurfaceView
+    // on SCVH path, FrameLayout on legacy) AND the SCVH-hosted content
+    // (`coverContent`). On some OEM builds (Samsung One UI on Android
+    // 14, observed on the Galaxy A05 / SM-A057F) the SCVH's content
+    // view appears in `WindowManagerGlobal.mViews` even though it
+    // lives inside the SCVH's own ViewRootImpl. Without excluding it
+    // the host walk picks our own content view as the "topmost", we
+    // then try to attach the cover as a sub-window of itself, and
+    // `addView` throws `BadTokenException: Unable to add window —
+    // token … is not valid; is your activity running?`. The cover
+    // never appears in the Recents thumbnail on those devices.
+    val topmost = CoverWindowAttachment.topmostHostViewFor(
+      activity,
+      exclude = coverView,
+      exclude2 = coverContent,
+    ) ?: decor
     val targetToken = topmost.windowToken ?: decor.windowToken!!
 
     if (coverView != null && coverAttachedToken === targetToken
@@ -1740,7 +1770,22 @@ class HybridCover : HybridCoverSpec() {
     // destroyed (e.g. a Modal that the cover was attached to has
     // since dismissed), in which case re-attaching to the stale
     // token would throw and silently leave the cover unmounted.
-    val topmost = CoverWindowAttachment.topmostHostViewFor(activity, exclude = coverView) ?: decor
+    // Exclude both the cover Window's root (`coverView` — SurfaceView
+    // on SCVH path, FrameLayout on legacy) AND the SCVH-hosted content
+    // (`coverContent`). On some OEM builds (Samsung One UI on Android
+    // 14, observed on the Galaxy A05 / SM-A057F) the SCVH's content
+    // view appears in `WindowManagerGlobal.mViews` even though it
+    // lives inside the SCVH's own ViewRootImpl. Without excluding it
+    // the host walk picks our own content view as the "topmost", we
+    // then try to attach the cover as a sub-window of itself, and
+    // `addView` throws `BadTokenException: Unable to add window —
+    // token … is not valid; is your activity running?`. The cover
+    // never appears in the Recents thumbnail on those devices.
+    val topmost = CoverWindowAttachment.topmostHostViewFor(
+      activity,
+      exclude = coverView,
+      exclude2 = coverContent,
+    ) ?: decor
     val targetToken = topmost.windowToken ?: decor.windowToken ?: return
     attachCover(activity, targetToken = targetToken, visible = isVisible, animated = false)
   }
