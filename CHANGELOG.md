@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7 - 2026-06-01
+
+-   Android: fix the cover never appearing on Samsung One UI (observed on Samsung Galaxy A05 / SM-A057F, Android 14). The host-window walk in `ensureCoverOnTopmost` and `addCover` excluded the cover Window's root (`coverView`, a `SurfaceView` on the SCVH path) but not the SCVH-hosted content (`coverContent`, a `FreezableFrameLayout`). On Samsung One UI's customised WindowManager the SCVH content appears in `WindowManagerGlobal.mViews` despite living inside the SCVH's own `ViewRootImpl`, so the walk identified our own content view as the topmost host, tried to attach the cover as a sub-window of itself, and `WindowManager.addView` threw `BadTokenException: Unable to add window — token … is not valid; is your activity running?`. The cover never reached the Recents thumbnail on those devices. Fix: pass `exclude2 = coverContent` to `CoverWindowAttachment.topmostHostViewFor` at all three callsites so the walk skips both views and falls back to the activity decor. `CoverWindowAttachment` already supported the parameter (the blur source picker uses it for the same reason). Verified on Samsung Galaxy A05 (Android 14, One UI) — Recents thumbnail now shows the configured `#5F8AFA` background with the splash icon, exactly the iOS App Switcher parity it was designed for.
+
+`minSdkVersion=23`, public API, and iOS behavior unchanged.
+
 ## 0.1.6 - 2026-06-01
 
 -   Android: eliminate the `IllegalArgumentException: Invalid window token (never added or removed already)` crash from `WindowlessWindowManager.relayout` reported on production devices (NEAR Mobile Play Console and others). v0.1.5's reflective traversal cancel only works on Android versions that don't block the hidden-API probe; Android 14+ hidden-API enforcement leaves the crash unfixed there. Five new layered defences in `detachCoverView` close the race deterministically without sacrificing the snapshot-race fix:
