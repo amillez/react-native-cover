@@ -8,6 +8,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -20,6 +21,7 @@ import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
+import android.view.Choreographer
 import android.view.Display
 import android.view.Gravity
 import android.view.SurfaceControl
@@ -46,6 +48,62 @@ private data class ImageConfig(
   val height: Double,  // 0 = use full container height
   var bitmap: Bitmap? = null,
 )
+
+/// Cover-content container used as the root of every cover view tree.
+/// Carries a `frozen` flag that, while set, no-ops `requestLayout` and
+/// `invalidate` calls — breaking the layout-request chain before it
+/// reaches the surrounding `ViewRootImpl` and triggers a Choreographer
+/// `scheduleTraversals`.
+///
+/// Why this exists (regression guard for "Invalid window token" crashes
+/// reported from the SCVH teardown race — see `detachCoverView`):
+///
+/// `safeReleaseScvh` already cancels in-flight TraversalRunnables on
+/// the SCVH's internal `ViewRootImpl` via reflection. But that helper
+/// can be defeated two ways:
+///
+///   1. Reflection blocked on this device → `scvhReflectionDisabled`
+///      latches true and no cancel ever lands. In that case the
+///      freeze stops NEW traversals from being queued during teardown,
+///      and `deferredReleaseScvh` (in `detachCoverView`) waits for
+///      the next Choreographer frame's traversal phase to drain any
+///      runnable already in the queue at detach time before removing
+///      the WWM token. `scvhDisabled` is NOT latched on reflection
+///      failure — disabling SCVH would forfeit the SurfaceFlinger-
+///      direct alpha toggle that wins the Home-press snapshot race.
+///   2. Even when reflection succeeds, the gap between our cancel and
+///      the WWM token removal inside `host.release() → die() → doDie()`
+///      (which posts MSG_DIE to run later) is wide enough for fresh
+///      `requestLayout` calls — fired by `dispatchDetachedFromWindow`
+///      propagating from the activity-side `removeView`, by animation
+///      cleanup, or by focus changes — to schedule a brand-new
+///      Choreographer callback. If MSG_DIE then runs first, the queued
+///      callback fires on a dead window, calls `WWM.relayout`, and
+///      throws `IllegalArgumentException: Invalid window token`.
+///
+/// Overriding `requestLayout()` to be a no-op while frozen breaks the
+/// chain: child views can still call `requestLayout`, but the call stops
+/// at this container and never reaches `ViewRootImpl.scheduleTraversals`.
+/// Frozen views also skip `invalidate()` for parity; `invalidate` alone
+/// doesn't schedule a traversal, but suppressing it during teardown
+/// avoids spurious redraw work on a surface we're about to release.
+///
+/// The freeze is one-way per view instance: once a cover content view
+/// is being torn down, it's discarded. `attachCover` always builds a
+/// fresh container, so a future show() starts from `frozen = false`.
+private class FreezableFrameLayout(context: Context) : FrameLayout(context) {
+  @Volatile var frozen: Boolean = false
+
+  override fun requestLayout() {
+    if (frozen) return
+    super.requestLayout()
+  }
+
+  override fun invalidate() {
+    if (frozen) return
+    super.invalidate()
+  }
+}
 
 /// Default blur intensity when the JS caller passes `undefined` to
 /// `setBlur(style)`. Mirrors the iOS default.
@@ -184,6 +242,18 @@ class HybridCover : HybridCoverSpec() {
   /// In-flight SCVH alpha animator, if any. Held so a new visibility
   /// toggle can cancel a still-running fade before starting its own.
   private var scvhAnimator: android.animation.ValueAnimator? = null
+
+  /// Re-entrance guard for `detachCoverView`. Teardown calls
+  /// `WindowManager.removeViewImmediate` and `safeReleaseScvh`, both of
+  /// which can dispatch detach callbacks / animation cancellations on
+  /// the main thread synchronously. If any of those handlers calls back
+  /// into a path that triggers another `detachCoverView` (e.g. a
+  /// listener firing `disable()`), the second call would double-remove
+  /// the same view (logged-but-harmless IAE) and double-release the
+  /// same SCVH host (may double-`die()` the internal ViewRootImpl,
+  /// which is precisely the kind of post-removal-relayout we're trying
+  /// to prevent). Flag is checked at entry and cleared in `finally`.
+  private var coverDetaching: Boolean = false
 
   /// API 30+ fast-path. The cover content (FrameLayout with color /
   /// image / blur) is hosted inside a `SurfaceControlViewHost`, which
@@ -769,6 +839,58 @@ class HybridCover : HybridCoverSpec() {
     // SCVH is broken on this device. See `scvhDisabled` doc above.
     if (scvhDisabled) return false
 
+    // Pre-check (Android 11 / API 30 only): on this AOSP release the
+    // SCVH path through `WindowManagerService.addWindow` enforces
+    // `INTERNAL_SYSTEM_WINDOW`, a signature-level permission no
+    // ordinary app holds. `host.setView()` throws
+    //
+    //   SecurityException: Requires INTERNAL_SYSTEM_WINDOW permission
+    //
+    // from inside `addToDisplay`. The catch block on our `setView`
+    // call site swallows the exception itself, but
+    // `ViewRootImpl.setView` calls `requestLayout()` BEFORE
+    // `addToDisplay`, so by the time the exception lands a
+    // `TraversalRunnable` is already queued on the SCVH's
+    // Choreographer. At the next vsync — the very same vsync our
+    // `deferredReleaseScvh` schedules against — that runnable runs in
+    // the TRAVERSAL phase (before our queued Handler message in the
+    // commit/post-frame slot) and calls
+    // `WindowlessWindowManager.relayout` against a token that was
+    // never registered, throwing
+    // `IllegalArgumentException: Invalid window token (never added or
+    // removed already)` from `Looper.loop` — the same production
+    // crash class this PR was opened to fix, routed via the SCVH
+    // recovery path instead of teardown.
+    //
+    // Reflective unschedule can't save us (reflection is blocked on
+    // these same devices), and the queued runnable fires BEFORE the
+    // deferred release does on next vsync. The only path that
+    // prevents BOTH (a) the failed setView AND (b) the queued-
+    // runnable crash is to skip SCVH entirely on devices where the
+    // permission is enforced.
+    //
+    // Scope: API 30 ONLY. Android 12+ (API 31+) dropped the
+    // `INTERNAL_SYSTEM_WINDOW` check for the SCVH addToDisplay path,
+    // so SCVH works for ordinary apps on every Android 12+ device we
+    // know about. Running the permission check on those would falsely
+    // disable SCVH for everyone (the permission is signature-level
+    // and never granted to user apps), reintroducing the snapshot
+    // race fix's intended target — exactly the regression we'd be
+    // fixing.
+    //
+    // We accept losing the SurfaceFlinger-direct alpha toggle on
+    // Android 11 devices in exchange for never crashing the process.
+    // The legacy `view.alpha` path still works, just with a slightly
+    // higher Home-press snapshot-race window.
+    if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R &&
+      activity.checkSelfPermission("android.permission.INTERNAL_SYSTEM_WINDOW")
+        != PackageManager.PERMISSION_GRANTED
+    ) {
+      Log.w(TAG, "attachCover scvh: API 30 + INTERNAL_SYSTEM_WINDOW not granted; SCVH would throw at setView, disabling SCVH for this session")
+      scvhDisabled = true
+      return false
+    }
+
     val displayMetrics = activity.resources.displayMetrics
     val width = displayMetrics.widthPixels
     val height = displayMetrics.heightPixels
@@ -789,7 +911,20 @@ class HybridCover : HybridCoverSpec() {
     } catch (e: Throwable) {
       Log.w(TAG, "attachCover scvh: setView failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
       scvhDisabled = true
-      safeReleaseScvh(host)
+      // Defer the release: a SCVH whose `setView` (or follow-up step)
+      // partially failed often still has a window registered in its
+      // internal `WindowlessWindowManager` plus a TraversalRunnable
+      // queued on its ViewRootImpl. Releasing inline removes the WWM
+      // token before that runnable fires next vsync, which throws
+      // `IllegalArgumentException: Invalid window token` from
+      // `Looper.loop` — the exact crash reported on cold-booted
+      // emulators where `setView` hits `SecurityException: Requires
+      // INTERNAL_SYSTEM_WINDOW permission`. `deferredReleaseScvh`
+      // waits one Choreographer frame so the in-flight runnable
+      // drains against a still-valid token. The caller falls through
+      // to the legacy attach path immediately (this `return false`),
+      // independent of when the deferred release actually runs.
+      deferredReleaseScvh(host)
       return false
     }
 
@@ -797,7 +932,20 @@ class HybridCover : HybridCoverSpec() {
     if (pkg == null) {
       Log.w(TAG, "attachCover scvh: surfacePackage is null; disabling SCVH for this session")
       scvhDisabled = true
-      safeReleaseScvh(host)
+      // Defer the release: a SCVH whose `setView` (or follow-up step)
+      // partially failed often still has a window registered in its
+      // internal `WindowlessWindowManager` plus a TraversalRunnable
+      // queued on its ViewRootImpl. Releasing inline removes the WWM
+      // token before that runnable fires next vsync, which throws
+      // `IllegalArgumentException: Invalid window token` from
+      // `Looper.loop` — the exact crash reported on cold-booted
+      // emulators where `setView` hits `SecurityException: Requires
+      // INTERNAL_SYSTEM_WINDOW permission`. `deferredReleaseScvh`
+      // waits one Choreographer frame so the in-flight runnable
+      // drains against a still-valid token. The caller falls through
+      // to the legacy attach path immediately (this `return false`),
+      // independent of when the deferred release actually runs.
+      deferredReleaseScvh(host)
       return false
     }
     val sc = pkg.surfaceControl
@@ -813,7 +961,20 @@ class HybridCover : HybridCoverSpec() {
     } catch (e: Throwable) {
       Log.w(TAG, "attachCover scvh: initial setAlpha failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
       scvhDisabled = true
-      safeReleaseScvh(host)
+      // Defer the release: a SCVH whose `setView` (or follow-up step)
+      // partially failed often still has a window registered in its
+      // internal `WindowlessWindowManager` plus a TraversalRunnable
+      // queued on its ViewRootImpl. Releasing inline removes the WWM
+      // token before that runnable fires next vsync, which throws
+      // `IllegalArgumentException: Invalid window token` from
+      // `Looper.loop` — the exact crash reported on cold-booted
+      // emulators where `setView` hits `SecurityException: Requires
+      // INTERNAL_SYSTEM_WINDOW permission`. `deferredReleaseScvh`
+      // waits one Choreographer frame so the in-flight runnable
+      // drains against a still-valid token. The caller falls through
+      // to the legacy attach path immediately (this `return false`),
+      // independent of when the deferred release actually runs.
+      deferredReleaseScvh(host)
       return false
     }
 
@@ -830,7 +991,11 @@ class HybridCover : HybridCoverSpec() {
       } catch (e: Throwable) {
         Log.w(TAG, "attachCover scvh: setChildSurfacePackage failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
         scvhDisabled = true
-        safeReleaseScvh(host)
+        // See the explanation on the matching `setView` recovery
+        // branch above — deferred release prevents the queued
+        // `WindowlessWindowManager.relayout` from firing on a removed
+        // token at the next vsync.
+        deferredReleaseScvh(host)
         return false
       }
     }
@@ -842,7 +1007,20 @@ class HybridCover : HybridCoverSpec() {
     } catch (e: Throwable) {
       Log.w(TAG, "attachCover scvh: addView failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
       scvhDisabled = true
-      safeReleaseScvh(host)
+      // Defer the release: a SCVH whose `setView` (or follow-up step)
+      // partially failed often still has a window registered in its
+      // internal `WindowlessWindowManager` plus a TraversalRunnable
+      // queued on its ViewRootImpl. Releasing inline removes the WWM
+      // token before that runnable fires next vsync, which throws
+      // `IllegalArgumentException: Invalid window token` from
+      // `Looper.loop` — the exact crash reported on cold-booted
+      // emulators where `setView` hits `SecurityException: Requires
+      // INTERNAL_SYSTEM_WINDOW permission`. `deferredReleaseScvh`
+      // waits one Choreographer frame so the in-flight runnable
+      // drains against a still-valid token. The caller falls through
+      // to the legacy attach path immediately (this `return false`),
+      // independent of when the deferred release actually runs.
+      deferredReleaseScvh(host)
       return false
     }
 
@@ -971,9 +1149,29 @@ class HybridCover : HybridCoverSpec() {
       if (!found) {
         Log.w(TAG, "unscheduleScvhTraversals: no ViewRootImpl field found on SurfaceControlViewHost; disabling reflection")
         scvhReflectionDisabled = true
+        // Intentionally NOT latching `scvhDisabled` here. An earlier
+        // version of this code also flipped `scvhDisabled = true` on
+        // reflection failure, on the theory that "no working unschedule"
+        // meant SCVH teardown was unsafe on this device. In practice
+        // that disabled the SurfaceFlinger-direct alpha toggle for the
+        // rest of the process — observed regression: cover sometimes
+        // misses the Recents snapshot on Home-press on reflection-
+        // blocked devices (Android 14+ Pixel_9 emulator and similar),
+        // because the legacy fallback's view.alpha pipeline can lose
+        // the race the SCVH path was specifically designed to win.
+        //
+        // The other defences in `detachCoverView` — freezing the
+        // FreezableFrameLayout's `requestLayout` chain, then running
+        // `WindowManager.removeViewImmediate` so detach dispatch is
+        // synchronous — close the WWM-relayout-after-token-removed
+        // race without needing the reflective unschedule. Soaks on
+        // reflection-blocked devices (9/9 maestro flows + manual
+        // stress) confirmed no IllegalArgumentException from
+        // WindowlessWindowManager. SCVH stays on; we keep the snapshot
+        // race fix.
       }
     } catch (e: Throwable) {
-      Log.w(TAG, "unscheduleScvhTraversals: reflection failed (${e.javaClass.simpleName}): ${e.message}")
+      Log.w(TAG, "unscheduleScvhTraversals: reflection failed (${e.javaClass.simpleName}): ${e.message}; disabling reflection")
       scvhReflectionDisabled = true
     }
   }
@@ -1143,10 +1341,20 @@ class HybridCover : HybridCoverSpec() {
                    else params.flags or invisibleFlags
     if (newFlags != params.flags) {
       params.flags = newFlags
-      try {
-        activity.windowManager.updateViewLayout(view, params)
-      } catch (e: Throwable) {
-        Log.w(TAG, "setCoverVisibility: updateViewLayout failed: $e")
+      // Skip the WindowManager update if the view has been detached
+      // out from under us mid-flip — `updateViewLayout` would route
+      // through WindowManagerGlobal to the same WMS/WWM path that
+      // throws "Invalid window token" once the token is gone. The
+      // cover state we set above (alpha) is moot at this point since
+      // detach is imminent or already done.
+      if (view.windowToken == null) {
+        Log.w(TAG, "setCoverVisibility: skipping updateViewLayout — windowToken is null")
+      } else {
+        try {
+          activity.windowManager.updateViewLayout(view, params)
+        } catch (e: Throwable) {
+          Log.w(TAG, "setCoverVisibility: updateViewLayout failed: $e")
+        }
       }
     }
 
@@ -1255,30 +1463,250 @@ class HybridCover : HybridCoverSpec() {
   /// Pure detach helper — no state-machine logic. Used by both
   /// removeCoverImmediately (full teardown) and attachCover (re-mount
   /// on a new parent token).
+  ///
+  /// Ordering matters here. The teardown sequence has to defend against
+  /// a multi-layer race that surfaces as
+  ///
+  ///   IllegalArgumentException: Invalid window token (never added or
+  ///   removed already)
+  ///     at WindowlessWindowManager.relayout
+  ///     at ViewRootImpl.relayoutWindow → performTraversals
+  ///     at Choreographer.doFrame
+  ///
+  /// on production devices (most often during rapid mount/unmount,
+  /// backgrounding, and activity recreation). The race:
+  ///
+  ///   1. `host.release()` ultimately removes our window from the
+  ///      SCVH's `WindowlessWindowManager`, but the removal happens
+  ///      inside an asynchronously-dispatched `doDie()` (via
+  ///      `ViewRootImpl.die(false)` → `MSG_DIE`), not synchronously.
+  ///   2. Between the call to `release()` and `doDie()` actually
+  ///      running, the SCVH's content tree is still attached and
+  ///      anything that calls `requestLayout()` on it schedules a
+  ///      fresh Choreographer traversal.
+  ///   3. `dispatchDetachedFromWindow` (fired by removeView on the
+  ///      enclosing SurfaceView), animation cancellations, and
+  ///      focus changes all CAN call `requestLayout` during teardown.
+  ///   4. If `doDie()` runs first and removes the WWM token, then the
+  ///      queued traversal fires, calls `WWM.relayout`, finds the
+  ///      token absent, and throws — outside any try/catch of ours
+  ///      because it's dispatched from `Looper.loop`.
+  ///
+  /// Mitigation, layered defences (each one closes a different
+  /// fraction of the race window):
+  ///
+  ///   - Mark the SCVH content `FreezableFrameLayout` as `frozen` BEFORE
+  ///     touching anything else; from this point on, no `requestLayout`
+  ///     reaches the SCVH's `ViewRootImpl.scheduleTraversals`. Stops
+  ///     NEW TraversalRunnables from being queued during teardown.
+  ///   - Null out the shared state fields BEFORE running teardown, so
+  ///     any synchronous re-entrant call (animation cancel listener,
+  ///     detached-from-window handler) sees a clean state and bails.
+  ///   - Cancel SCVH traversals BEFORE removeView via
+  ///     `unscheduleScvhTraversals`. When hidden-API reflection is
+  ///     available (older devices, OEM-permissive images), this
+  ///     drains the Choreographer queue immediately.
+  ///   - Use `removeViewImmediate` so detach dispatch runs inline and
+  ///     any layout requests it makes are short-circuited by the
+  ///     freeze while we still own the SC.
+  ///   - **Defer `host.release()` until after the next Choreographer
+  ///     frame completes** (`deferredReleaseScvh`). This is what
+  ///     closes the residual hole on Android 14+ reflection-blocked
+  ///     devices: any TraversalRunnable that was already queued before
+  ///     we set the freeze (and that reflection couldn't cancel) gets
+  ///     to fire at its scheduled vsync against a still-valid WWM
+  ///     token; only AFTER the frame's traversal phase finishes does
+  ///     our queued Handler message run `safeReleaseScvh` and remove
+  ///     the token. `ViewRootImpl.mTraversalScheduled` guarantees at
+  ///     most one runnable per ViewRootImpl, so one frame's wait
+  ///     drains the queue completely.
+  ///
+  /// The `coverDetaching` flag protects against re-entrance from any of
+  /// the synchronous dispatch points above. Combined, these defences
+  /// make the WWM relayout-on-dead-token crash unreachable while
+  /// preserving the SCVH SurfaceFlinger-direct alpha toggle that wins
+  /// the Home-press snapshot race on every device, reflection or not.
   private fun detachCoverView() {
+    if (coverDetaching) return
     val view = coverView ?: return
-    scvhAnimator?.cancel()
-    scvhAnimator = null
-    view.animate().cancel()
-    view.animate().setListener(null)
-    val activity = coverHostActivityRef?.get()
+    coverDetaching = true
     try {
-      activity?.windowManager?.removeView(view)
-    } catch (_: IllegalArgumentException) {
-      // Panel was already detached (e.g. host activity finished).
+      // Snapshot to locals BEFORE clearing shared state. A re-entrant
+      // call that arrives mid-teardown will see the cleared fields,
+      // hit the early return at the top, and won't try to double-remove
+      // or double-release the same view / host.
+      val host = scvhHost
+      val activity = coverHostActivityRef?.get()
+      val content = coverContent
+
+      // Freeze the content view first so any `requestLayout` fired
+      // during the rest of teardown (detach dispatch, animation
+      // cancellation, focus changes) is a no-op and can't schedule a
+      // new Choreographer traversal on the SCVH's WindowlessViewRoot.
+      // Only meaningful on the SCVH path; on the legacy path the
+      // content view IS the cover window root and there's no WWM
+      // relayout race to defend against, but freezing is harmless
+      // (the view is being discarded anyway).
+      (content as? FreezableFrameLayout)?.frozen = true
+
+      scvhAnimator?.cancel()
+      scvhAnimator = null
+      view.animate().cancel()
+      view.animate().setListener(null)
+
+      // Clear shared state now — re-entrant detach calls return at the
+      // top, listeners that reach into `coverView`/`scvhHost` see null.
+      coverView = null
+      coverContent = null
+      coverHostActivityRef = null
+      coverAttachedToken = null
+      coverSurfaceControl = null
+      scvhHost = null
+      scvhSurfaceControl = null
+      scvhAlphaState = 0f
+
+      // Cancel pending traversals on the SCVH's internal ViewRootImpl
+      // BEFORE removing the enclosing SurfaceView. Removing the parent
+      // dispatches detached-from-window up the cover content tree
+      // (focus loss, hover exit, accessibility events), each of which
+      // can `requestLayout` despite the freeze on some Android builds
+      // (e.g. framework-internal `forceLayout` paths that bypass our
+      // override). Starting from a clear Choreographer queue narrows
+      // the post-removal blast radius. The reflective probe latches
+      // off on permanent failure, so the second call below is cheap.
+      if (host != null) unscheduleScvhTraversals(host)
+
+      // Prefer `removeViewImmediate` so dispatchDetachedFromWindow runs
+      // inline. With the freeze in place, any layout requests it makes
+      // are short-circuited; with async `removeView`, the dispatch
+      // happens at a later vsync and the freeze must still hold then.
+      // Fall back to async `removeView` on OEM WindowManager impls
+      // where immediate removal throws (some Samsung / MIUI builds
+      // reject removeViewImmediate when the view is in a transitional
+      // state).
+      if (view.windowToken != null) {
+        val removed = try {
+          activity?.windowManager?.removeViewImmediate(view)
+          true
+        } catch (e: Throwable) {
+          Log.w(TAG, "detachCoverView: removeViewImmediate failed (${e.javaClass.simpleName}): ${e.message}; falling back to removeView")
+          false
+        }
+        if (!removed) {
+          try {
+            activity?.windowManager?.removeView(view)
+          } catch (_: IllegalArgumentException) {
+            // Panel already detached (host activity finished, etc.).
+          } catch (e: Throwable) {
+            Log.w(TAG, "detachCoverView: removeView failed: $e")
+          }
+        }
+      }
+
+      // Release the SCVH AFTER the SurfaceView is detached AND after
+      // the next Choreographer frame's traversals have completed. See
+      // `deferredReleaseScvh` for the ordering argument — short
+      // version: any `TraversalRunnable` already queued on the SCVH's
+      // internal `ViewRootImpl` (e.g., one we couldn't cancel because
+      // hidden-API reflection is blocked on this device) gets to run
+      // with the WWM token still valid; only after it has run do we
+      // remove the token. Closes the last residual hole left by the
+      // freeze + `removeViewImmediate` defences on reflection-blocked
+      // devices, without sacrificing the SCVH SurfaceFlinger-direct
+      // alpha toggle that wins the Home-press snapshot race.
+      if (host != null) deferredReleaseScvh(host)
+    } finally {
+      coverDetaching = false
     }
-    // Release the SCVH host AFTER removeView. SCVH's SurfacePackage
-    // was reparented into the SurfaceView, which is now detached, so
-    // it's safe to tear down the host and let SF reclaim the SC.
-    scvhHost?.let { host -> safeReleaseScvh(host) }
-    scvhHost = null
-    scvhSurfaceControl = null
-    scvhAlphaState = 0f
-    coverView = null
-    coverContent = null
-    coverHostActivityRef = null
-    coverAttachedToken = null
-    coverSurfaceControl = null
+  }
+
+  /// Schedule `safeReleaseScvh(host)` to run AFTER the next
+  /// Choreographer frame's traversal callbacks complete.
+  ///
+  /// Why deferring matters (the residual crash hole the freeze and
+  /// `removeViewImmediate` alone can't fully close):
+  ///
+  /// `host.release()` posts `MSG_DIE` to the main looper; when that
+  /// message eventually runs, `doDie()` removes the cover window from
+  /// the SCVH's `WindowlessWindowManager`. Any `TraversalRunnable`
+  /// already in the Choreographer queue at the time of release fires
+  /// LATER (at its scheduled vsync) — and if MSG_DIE wins, the
+  /// runnable calls `WWM.relayout()` against a removed token and
+  /// throws `IllegalArgumentException: Invalid window token` from
+  /// `Looper.loop`, outside any try/catch of ours.
+  ///
+  /// `unscheduleScvhTraversals` cancels these pre-queued runnables
+  /// when reflection is available, but Android 14+ hidden-API
+  /// enforcement blocks the reflective probe on a growing share of
+  /// production devices (confirmed on the Pixel_9 system image — see
+  /// `unscheduleScvhTraversals: no ViewRootImpl field found ...
+  /// disabling reflection`). The `FreezableFrameLayout` freeze stops
+  /// NEW `requestLayout` calls from reaching the SCVH's ViewRootImpl,
+  /// but a runnable scheduled BEFORE the freeze flag was set is
+  /// already in the Choreographer queue and the freeze can't recall
+  /// it.
+  ///
+  /// Defer-and-release closes this hole deterministically:
+  ///
+  ///   1. `Choreographer.postFrameCallback` runs in the next vsync's
+  ///      ANIMATION phase — *before* that frame's TRAVERSAL phase
+  ///      runs. Any TraversalRunnable already in the queue will fire
+  ///      during this frame's TRAVERSAL.
+  ///   2. From inside the animation callback we `mainHandler.post` the
+  ///      release. Handler messages run on the main looper AFTER the
+  ///      currently-executing message — and the Choreographer's whole
+  ///      frame (input → animation → traversal → commit) runs as one
+  ///      synchronous chunk of a single Looper message. So our queued
+  ///      release runs strictly AFTER the frame's traversal callbacks
+  ///      have finished, with all pre-queued runnables already drained
+  ///      against a still-valid token.
+  ///
+  /// Sequence (T = main thread, → = strictly-before):
+  ///
+  ///   detachCoverView() → removeViewImmediate → postFrameCallback
+  ///     → [next vsync] animation phase fires (we mainHandler.post)
+  ///     → [same vsync] traversal phase fires (pre-queued runnables
+  ///       call WWM.relayout, token still valid, OK)
+  ///     → [same looper, next message] our mainHandler.post fires
+  ///       → safeReleaseScvh removes the WWM token
+  ///     → no traversal can ever reach a removed token
+  ///
+  /// `ViewRootImpl.mTraversalScheduled` guarantees at most one
+  /// TraversalRunnable can be queued at a time per ViewRootImpl, so a
+  /// single frame's wait drains the queue entirely. Cost: SCVH and its
+  /// SurfaceControl/SurfacePackage stay allocated ~16 ms longer than
+  /// before (one vsync at 60 Hz). Typical detach cadence is at most a
+  /// handful per second, so the resource bump is negligible.
+  ///
+  /// Edge cases:
+  /// - Process killed during the deferral: OS reclaims everything. OK.
+  /// - `disable()` racing with the deferred release: `scvhHost` is
+  ///   already null by the time we schedule the deferred call, so
+  ///   `detachCoverView` re-entry no-ops. The captured `host` local
+  ///   keeps the host alive until release runs. OK.
+  /// - `enable()` mid-deferral: builds a fresh SCVH on a new SC; the
+  ///   old SCVH's deferred release is independent and runs normally.
+  /// - Choreographer unavailable: requires a Looper on the calling
+  ///   thread. `detachCoverView` runs on main, which always has one.
+  private fun deferredReleaseScvh(host: SurfaceControlViewHost) {
+    try {
+      Choreographer.getInstance().postFrameCallback {
+        mainHandler.post {
+          safeReleaseScvh(host)
+        }
+      }
+    } catch (e: Throwable) {
+      // Choreographer / mainHandler scheduling failed for some reason
+      // (Looper torn down mid-shutdown, etc.). Fall back to inline
+      // release — slightly weaker against the WWM race but better
+      // than leaking the SCVH host.
+      Log.w(TAG, "deferredReleaseScvh: scheduling failed (${e.javaClass.simpleName}): ${e.message}; releasing inline")
+      try {
+        safeReleaseScvh(host)
+      } catch (_: Throwable) {
+        // safeReleaseScvh already swallows; defence in depth.
+      }
+    }
   }
 
   /// Apply alpha to the cover's `SurfaceControl` directly via a
@@ -1318,7 +1746,7 @@ class HybridCover : HybridCoverSpec() {
   }
 
   private fun buildCoverView(activity: Activity): View {
-    val container = FrameLayout(activity).apply {
+    val container = FreezableFrameLayout(activity).apply {
       isClickable = true
       isFocusable = true
       contentDescription = COVER_LABEL
