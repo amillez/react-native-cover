@@ -62,6 +62,20 @@ internal object CoverWindowAttachment {
       val v = views[i]
       if (v === exclude) continue
       if (v === exclude2) continue
+      // Reject ANY cover-owned view, current or stale. The instance
+      // matches above only filter the live `coverView` / `coverContent`
+      // we last set; previous attaches whose teardown raced with a
+      // re-attach can leave stale `FreezableFrameLayout` instances
+      // briefly lingering in `mViews` on some OEM WindowManager
+      // builds (notably Samsung One UI on Android 14 — observed on
+      // Galaxy A05 / SM-A057F). Without this class-based filter the
+      // walk picks one of those stale views as "topmost", tries to
+      // attach the new cover as a sub-window of its now-invalid token,
+      // and `addView` throws `BadTokenException: Unable to add window
+      // — token … is not valid; is your activity running?`. The cover
+      // never reaches the Recents thumbnail. Class match catches all
+      // instances regardless of which attach cycle created them.
+      if (v is FreezableFrameLayout) continue
       if (v.windowToken == null) continue
       // Reject views that have been detached from their ViewRootImpl
       // but are still lingering in mViews (mDyingViews entries — see
