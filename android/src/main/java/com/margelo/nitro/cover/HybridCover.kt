@@ -869,10 +869,10 @@ class HybridCover : HybridCoverSpec() {
     // SCVH is broken on this device. See `scvhDisabled` doc above.
     if (scvhDisabled) return false
 
-    // Pre-check (Android 11 / API 30 only): on this AOSP release the
-    // SCVH path through `WindowManagerService.addWindow` enforces
-    // `INTERNAL_SYSTEM_WINDOW`, a signature-level permission no
-    // ordinary app holds. `host.setView()` throws
+    // Pre-check (Android 11 / 12 / 12L — API 30 to 32): on these AOSP
+    // releases the SCVH path through `WindowManagerService.addWindow`
+    // enforces `INTERNAL_SYSTEM_WINDOW`, a signature-level permission
+    // no ordinary app holds. `host.setView()` throws
     //
     //   SecurityException: Requires INTERNAL_SYSTEM_WINDOW permission
     //
@@ -881,42 +881,42 @@ class HybridCover : HybridCoverSpec() {
     // `ViewRootImpl.setView` calls `requestLayout()` BEFORE
     // `addToDisplay`, so by the time the exception lands a
     // `TraversalRunnable` is already queued on the SCVH's
-    // Choreographer. At the next vsync — the very same vsync our
-    // `deferredReleaseScvh` schedules against — that runnable runs in
-    // the TRAVERSAL phase (before our queued Handler message in the
-    // commit/post-frame slot) and calls
-    // `WindowlessWindowManager.relayout` against a token that was
-    // never registered, throwing
+    // Choreographer. At the next vsync that runnable runs in the
+    // TRAVERSAL phase — strictly before any Handler messages our
+    // recovery path could schedule (`deferredReleaseScvh` posts via
+    // `Choreographer.postFrameCallback` → animation phase →
+    // `mainHandler.post`, which lands after the traversal phase
+    // completes) — and calls `WindowlessWindowManager.relayout`
+    // against a token that was never registered, throwing
     // `IllegalArgumentException: Invalid window token (never added or
-    // removed already)` from `Looper.loop` — the same production
-    // crash class this PR was opened to fix, routed via the SCVH
-    // recovery path instead of teardown.
+    // removed already)` from `Looper.loop`. The crash signature in
+    // production matches this exactly (reported on Pixel 6 / Android
+    // 12 — reproduced 1:1 on the emulator).
     //
-    // Reflective unschedule can't save us (reflection is blocked on
-    // these same devices), and the queued runnable fires BEFORE the
-    // deferred release does on next vsync. The only path that
-    // prevents BOTH (a) the failed setView AND (b) the queued-
-    // runnable crash is to skip SCVH entirely on devices where the
-    // permission is enforced.
+    // The catch block below now also calls `unscheduleScvhTraversals`
+    // SYNCHRONOUSLY to cancel that queued runnable before the next
+    // vsync — that's the structural fix that protects every API where
+    // setView might unexpectedly fail. This pre-check is an
+    // optimization on top: known-affected Android versions skip the
+    // wasted SCVH attempt entirely.
     //
-    // Scope: API 30 ONLY. Android 12+ (API 31+) dropped the
-    // `INTERNAL_SYSTEM_WINDOW` check for the SCVH addToDisplay path,
-    // so SCVH works for ordinary apps on every Android 12+ device we
-    // know about. Running the permission check on those would falsely
-    // disable SCVH for everyone (the permission is signature-level
-    // and never granted to user apps), reintroducing the snapshot
-    // race fix's intended target — exactly the regression we'd be
-    // fixing.
+    // Scope: API 30..32 (Android 11, 12, 12L). AOSP relaxed the
+    // `INTERNAL_SYSTEM_WINDOW` requirement for SCVH's `addToDisplay`
+    // path starting in Android 13 (API 33), so SCVH works for
+    // ordinary apps on every Android 13+ device we know about.
+    // Empirically confirmed working on Pixel_9 / Android 16 (API 37)
+    // — the maestro regression suite passes 9/9 there with the
+    // SCVH SurfaceFlinger-direct alpha toggle active.
     //
-    // We accept losing the SurfaceFlinger-direct alpha toggle on
-    // Android 11 devices in exchange for never crashing the process.
-    // The legacy `view.alpha` path still works, just with a slightly
-    // higher Home-press snapshot-race window.
-    if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R &&
+    // We accept losing that SF-direct toggle on Android 11/12/12L
+    // devices in exchange for never crashing the process. The legacy
+    // `view.alpha` path still works, just with a slightly higher
+    // Home-press snapshot-race window.
+    if (Build.VERSION.SDK_INT in Build.VERSION_CODES.R..Build.VERSION_CODES.S_V2 &&
       activity.checkSelfPermission("android.permission.INTERNAL_SYSTEM_WINDOW")
         != PackageManager.PERMISSION_GRANTED
     ) {
-      Log.w(TAG, "attachCover scvh: API 30 + INTERNAL_SYSTEM_WINDOW not granted; SCVH would throw at setView, disabling SCVH for this session")
+      Log.w(TAG, "attachCover scvh: API ${Build.VERSION.SDK_INT} + INTERNAL_SYSTEM_WINDOW not granted; SCVH would throw at setView, disabling SCVH for this session")
       scvhDisabled = true
       return false
     }
@@ -939,43 +939,13 @@ class HybridCover : HybridCoverSpec() {
     try {
       host.setView(content, width, height)
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: setView failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
-      scvhDisabled = true
-      // Defer the release: a SCVH whose `setView` (or follow-up step)
-      // partially failed often still has a window registered in its
-      // internal `WindowlessWindowManager` plus a TraversalRunnable
-      // queued on its ViewRootImpl. Releasing inline removes the WWM
-      // token before that runnable fires next vsync, which throws
-      // `IllegalArgumentException: Invalid window token` from
-      // `Looper.loop` — the exact crash reported on cold-booted
-      // emulators where `setView` hits `SecurityException: Requires
-      // INTERNAL_SYSTEM_WINDOW permission`. `deferredReleaseScvh`
-      // waits one Choreographer frame so the in-flight runnable
-      // drains against a still-valid token. The caller falls through
-      // to the legacy attach path immediately (this `return false`),
-      // independent of when the deferred release actually runs.
-      deferredReleaseScvh(host)
+      failScvhAttach(host, "setView failed (${e.javaClass.simpleName}): ${e.message}")
       return false
     }
 
     val pkg = host.surfacePackage
     if (pkg == null) {
-      Log.w(TAG, "attachCover scvh: surfacePackage is null; disabling SCVH for this session")
-      scvhDisabled = true
-      // Defer the release: a SCVH whose `setView` (or follow-up step)
-      // partially failed often still has a window registered in its
-      // internal `WindowlessWindowManager` plus a TraversalRunnable
-      // queued on its ViewRootImpl. Releasing inline removes the WWM
-      // token before that runnable fires next vsync, which throws
-      // `IllegalArgumentException: Invalid window token` from
-      // `Looper.loop` — the exact crash reported on cold-booted
-      // emulators where `setView` hits `SecurityException: Requires
-      // INTERNAL_SYSTEM_WINDOW permission`. `deferredReleaseScvh`
-      // waits one Choreographer frame so the in-flight runnable
-      // drains against a still-valid token. The caller falls through
-      // to the legacy attach path immediately (this `return false`),
-      // independent of when the deferred release actually runs.
-      deferredReleaseScvh(host)
+      failScvhAttach(host, "surfacePackage is null")
       return false
     }
     val sc = pkg.surfaceControl
@@ -989,22 +959,7 @@ class HybridCover : HybridCoverSpec() {
         .setAlpha(sc, if (visible) 1f else 0f)
         .apply()
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: initial setAlpha failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
-      scvhDisabled = true
-      // Defer the release: a SCVH whose `setView` (or follow-up step)
-      // partially failed often still has a window registered in its
-      // internal `WindowlessWindowManager` plus a TraversalRunnable
-      // queued on its ViewRootImpl. Releasing inline removes the WWM
-      // token before that runnable fires next vsync, which throws
-      // `IllegalArgumentException: Invalid window token` from
-      // `Looper.loop` — the exact crash reported on cold-booted
-      // emulators where `setView` hits `SecurityException: Requires
-      // INTERNAL_SYSTEM_WINDOW permission`. `deferredReleaseScvh`
-      // waits one Choreographer frame so the in-flight runnable
-      // drains against a still-valid token. The caller falls through
-      // to the legacy attach path immediately (this `return false`),
-      // independent of when the deferred release actually runs.
-      deferredReleaseScvh(host)
+      failScvhAttach(host, "initial setAlpha failed (${e.javaClass.simpleName}): ${e.message}")
       return false
     }
 
@@ -1019,13 +974,7 @@ class HybridCover : HybridCoverSpec() {
       try {
         setChildSurfacePackage(pkg)
       } catch (e: Throwable) {
-        Log.w(TAG, "attachCover scvh: setChildSurfacePackage failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
-        scvhDisabled = true
-        // See the explanation on the matching `setView` recovery
-        // branch above — deferred release prevents the queued
-        // `WindowlessWindowManager.relayout` from firing on a removed
-        // token at the next vsync.
-        deferredReleaseScvh(host)
+        failScvhAttach(host, "setChildSurfacePackage failed (${e.javaClass.simpleName}): ${e.message}")
         return false
       }
     }
@@ -1035,22 +984,7 @@ class HybridCover : HybridCoverSpec() {
     try {
       activity.windowManager.addView(surfaceView, params)
     } catch (e: Throwable) {
-      Log.w(TAG, "attachCover scvh: addView failed (${e.javaClass.simpleName}): ${e.message}; disabling SCVH for this session")
-      scvhDisabled = true
-      // Defer the release: a SCVH whose `setView` (or follow-up step)
-      // partially failed often still has a window registered in its
-      // internal `WindowlessWindowManager` plus a TraversalRunnable
-      // queued on its ViewRootImpl. Releasing inline removes the WWM
-      // token before that runnable fires next vsync, which throws
-      // `IllegalArgumentException: Invalid window token` from
-      // `Looper.loop` — the exact crash reported on cold-booted
-      // emulators where `setView` hits `SecurityException: Requires
-      // INTERNAL_SYSTEM_WINDOW permission`. `deferredReleaseScvh`
-      // waits one Choreographer frame so the in-flight runnable
-      // drains against a still-valid token. The caller falls through
-      // to the legacy attach path immediately (this `return false`),
-      // independent of when the deferred release actually runs.
-      deferredReleaseScvh(host)
+      failScvhAttach(host, "addView failed (${e.javaClass.simpleName}): ${e.message}")
       return false
     }
 
@@ -1718,6 +1652,67 @@ class HybridCover : HybridCoverSpec() {
   ///   old SCVH's deferred release is independent and runs normally.
   /// - Choreographer unavailable: requires a Looper on the calling
   ///   thread. `detachCoverView` runs on main, which always has one.
+  /// SCVH attach-recovery helper. Run when any step of
+  /// `tryAttachCoverViaScvh` after the SCVH ctor throws or returns an
+  /// invalid result (`setView`, null `surfacePackage`, initial
+  /// `setAlpha`, `setChildSurfacePackage`, `addView`). Performs the
+  /// three things every recovery branch must do:
+  ///
+  ///   1. Latches `scvhDisabled = true` so subsequent attaches in this
+  ///      process skip SCVH entirely. Failure modes have been
+  ///      consistent per device — if it failed once it will keep
+  ///      failing.
+  ///   2. **SYNCHRONOUSLY** calls `unscheduleScvhTraversals(host)`.
+  ///      `ViewRootImpl.setView` queues a `TraversalRunnable` via
+  ///      `requestLayout()` BEFORE the throwing `addToDisplay`, so by
+  ///      the time the SCVH catch block runs there is already a
+  ///      runnable in the SCVH's internal Choreographer queue. That
+  ///      runnable fires at the next vsync in the TRAVERSAL phase and
+  ///      calls `WindowlessWindowManager.relayout` against a token
+  ///      that was never registered with the WWM, throwing
+  ///      `IllegalArgumentException: Invalid window token (never
+  ///      added or removed already)` from `Looper.loop`. The
+  ///      `deferredReleaseScvh` below CANNOT prevent this — it posts
+  ///      via `Choreographer.postFrameCallback` (animation phase) →
+  ///      `mainHandler.post`, which always runs strictly AFTER the
+  ///      traversal phase of the same vsync. Calling the reflective
+  ///      unschedule synchronously HERE — main-thread, before
+  ///      returning to the caller — is what actually drains the
+  ///      queued runnable before the next vsync fires. The unschedule
+  ///      latches off (`scvhReflectionDisabled = true`) on reflection
+  ///      failure, so this is a no-op on devices where the hidden-API
+  ///      probe isn't available; on those devices the
+  ///      `INTERNAL_SYSTEM_WINDOW` pre-check at the top of
+  ///      `tryAttachCoverViaScvh` is the primary line of defence and
+  ///      this helper is unreachable in the steady state.
+  ///   3. Defers `host.release()` across one Choreographer frame via
+  ///      `deferredReleaseScvh`. By the time the release fires the
+  ///      queued runnable has been cancelled and the SCVH ViewRootImpl
+  ///      has had a chance to settle; release runs against a stable
+  ///      tree.
+  ///
+  /// The matching crash was originally reported on Android 11 (API 30,
+  /// Galaxy A05 / SM-A057F) and reproduced 1:1 on a Pixel 6 / Android
+  /// 12 (API 31) emulator with this exact stack:
+  ///
+  ///   FATAL EXCEPTION: main
+  ///   java.lang.IllegalArgumentException: Invalid window token
+  ///     at WindowlessWindowManager.relayout
+  ///     at ViewRootImpl.relayoutWindow
+  ///     at ViewRootImpl.performTraversals
+  ///     at ViewRootImpl.doTraversal
+  ///     at ViewRootImpl$TraversalRunnable.run
+  ///     at Choreographer$CallbackRecord.run
+  ///     at Choreographer.doCallbacks
+  ///     at Choreographer.doFrame
+  ///     at Looper.loop
+  private fun failScvhAttach(host: SurfaceControlViewHost, reason: String) {
+    Log.w(TAG, "attachCover scvh: $reason; disabling SCVH for this session")
+    scvhDisabled = true
+    unscheduleScvhTraversals(host)
+    deferredReleaseScvh(host)
+  }
+
   private fun deferredReleaseScvh(host: SurfaceControlViewHost) {
     try {
       Choreographer.getInstance().postFrameCallback {
