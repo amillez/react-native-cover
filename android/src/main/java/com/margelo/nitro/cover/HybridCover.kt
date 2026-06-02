@@ -869,54 +869,76 @@ class HybridCover : HybridCoverSpec() {
     // SCVH is broken on this device. See `scvhDisabled` doc above.
     if (scvhDisabled) return false
 
-    // Pre-check (Android 11 / 12 / 12L — API 30 to 32): on these AOSP
-    // releases the SCVH path through `WindowManagerService.addWindow`
-    // enforces `INTERNAL_SYSTEM_WINDOW`, a signature-level permission
-    // no ordinary app holds. `host.setView()` throws
+    // Pre-check (Android 11..15 — API 30 to 36): SCVH attach via
+    // `WindowManagerService.addWindow` is unreliable across this entire
+    // range. The failure shape varies:
     //
-    //   SecurityException: Requires INTERNAL_SYSTEM_WINDOW permission
+    //   * Android 11 / 12 / 12L (API 30..32): `host.setView()` throws
+    //     `SecurityException: Requires INTERNAL_SYSTEM_WINDOW
+    //     permission` (a signature-level permission no ordinary app
+    //     holds). Reproduced on the official AOSP `arm64-v8a` system
+    //     images for `system-images;android-30..32`.
+    //   * Android 13..14 (API 33..34): `host.setView()` throws
+    //     `RuntimeException: Adding window failed` on Samsung One UI
+    //     and certain other OEM builds. The stock Pixel emulator
+    //     image happens to swallow it gracefully; production crash
+    //     reports show the OEM-customised WMS does not. Cold-boot
+    //     Pixel emulator on Android 14 has also been observed to hit
+    //     this transiently.
+    //   * Android 15..16 (API 35..36): OEM customisation behaviour is
+    //     not yet documented; we treat this range as "unknown" for
+    //     safety. Anecdotal reports suggest similar issues persist on
+    //     Samsung's One UI builds tracking 15.
     //
-    // from inside `addToDisplay`. The catch block on our `setView`
-    // call site swallows the exception itself, but
-    // `ViewRootImpl.setView` calls `requestLayout()` BEFORE
-    // `addToDisplay`, so by the time the exception lands a
-    // `TraversalRunnable` is already queued on the SCVH's
-    // Choreographer. At the next vsync that runnable runs in the
-    // TRAVERSAL phase — strictly before any Handler messages our
-    // recovery path could schedule (`deferredReleaseScvh` posts via
-    // `Choreographer.postFrameCallback` → animation phase →
-    // `mainHandler.post`, which lands after the traversal phase
-    // completes) — and calls `WindowlessWindowManager.relayout`
-    // against a token that was never registered, throwing
-    // `IllegalArgumentException: Invalid window token (never added or
-    // removed already)` from `Looper.loop`. The crash signature in
-    // production matches this exactly (reported on Pixel 6 / Android
-    // 12 — reproduced 1:1 on the emulator).
+    // The exact crash signature is identical in every failure mode
+    // because the underlying cause is the same: `ViewRootImpl.setView`
+    // calls `requestLayout()` BEFORE the throwing `addToDisplay`, so
+    // by the time our catch block runs there is already a
+    // `TraversalRunnable` queued on the SCVH's Choreographer. At the
+    // next vsync the runnable fires in the TRAVERSAL phase — strictly
+    // before any Handler message our recovery path could schedule
+    // (`deferredReleaseScvh` posts via `Choreographer.postFrameCallback`
+    // → animation phase → `mainHandler.post`, which lands AFTER
+    // traversal) — and calls `WindowlessWindowManager.relayout`
+    // against a token that was never registered with the WWM,
+    // throwing
     //
-    // The catch block below now also calls `unscheduleScvhTraversals`
+    //   IllegalArgumentException: Invalid window token
+    //     at android.view.WindowlessWindowManager.relayout
+    //     at android.view.ViewRootImpl.relayoutWindow
+    //     at android.view.ViewRootImpl.performTraversals
+    //     at android.view.Choreographer.doFrame
+    //     at android.os.Looper.loop
+    //
+    // The catch block below DOES call `unscheduleScvhTraversals(host)`
     // SYNCHRONOUSLY to cancel that queued runnable before the next
-    // vsync — that's the structural fix that protects every API where
-    // setView might unexpectedly fail. This pre-check is an
-    // optimization on top: known-affected Android versions skip the
-    // wasted SCVH attempt entirely.
+    // vsync — that's the structural defence for unexpected failures.
+    // But the reflective unschedule is increasingly blocked on
+    // Android 14+ hidden-API enforcement (the SCVH ViewRootImpl field
+    // is `@hide`), at which point the safety net no-ops and the only
+    // remaining defence is to never attempt SCVH on these APIs.
     //
-    // Scope: API 30..32 (Android 11, 12, 12L). AOSP relaxed the
-    // `INTERNAL_SYSTEM_WINDOW` requirement for SCVH's `addToDisplay`
-    // path starting in Android 13 (API 33), so SCVH works for
-    // ordinary apps on every Android 13+ device we know about.
-    // Empirically confirmed working on Pixel_9 / Android 16 (API 37)
-    // — the maestro regression suite passes 9/9 there with the
-    // SCVH SurfaceFlinger-direct alpha toggle active.
+    // Scope: API 30..36 (Android 11 through Android 15 inclusive).
+    // Pixel_9 / Android 16 (API 37) is the lowest API where we have
+    // empirical confirmation that SCVH works reliably for ordinary
+    // apps — maestro suite 9/9 green with the SF-direct alpha toggle
+    // active (`broadcast: fast scvh=true`). Future Android releases
+    // are assumed working; if a regression is reported on API 37+,
+    // extend this upper bound.
     //
-    // We accept losing that SF-direct toggle on Android 11/12/12L
-    // devices in exchange for never crashing the process. The legacy
-    // `view.alpha` path still works, just with a slightly higher
-    // Home-press snapshot-race window.
-    if (Build.VERSION.SDK_INT in Build.VERSION_CODES.R..Build.VERSION_CODES.S_V2 &&
+    // We accept losing the SF-direct alpha toggle on Android 11..15
+    // devices in exchange for guaranteed crash-free behaviour. The
+    // legacy `view.alpha` path still works for cover visibility, just
+    // with a slightly higher Home-press snapshot-race window. The
+    // reflection-based SC capture used by the legacy fast path is
+    // also blocked on Android 14+, so the actual SF-direct benefit
+    // loss is concentrated on Android 11..13 — where the pre-check
+    // is non-negotiable to prevent crashes.
+    if (Build.VERSION.SDK_INT in Build.VERSION_CODES.R..36 &&
       activity.checkSelfPermission("android.permission.INTERNAL_SYSTEM_WINDOW")
         != PackageManager.PERMISSION_GRANTED
     ) {
-      Log.w(TAG, "attachCover scvh: API ${Build.VERSION.SDK_INT} + INTERNAL_SYSTEM_WINDOW not granted; SCVH would throw at setView, disabling SCVH for this session")
+      Log.w(TAG, "attachCover scvh: API ${Build.VERSION.SDK_INT} (Android 11..15 range) + INTERNAL_SYSTEM_WINDOW not granted; SCVH unreliable across this range, disabling SCVH for this session")
       scvhDisabled = true
       return false
     }
