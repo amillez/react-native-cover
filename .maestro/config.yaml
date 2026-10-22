@@ -8,3 +8,4 @@ flows:
   - flows/blur-intensity.yaml
   - flows/fade.yaml
   - flows/keyboard-input.yaml
+  - flows/system-mode.yaml

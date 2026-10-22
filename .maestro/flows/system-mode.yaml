@@ -1,0 +1,49 @@
+appId: com.agustinmj.coverexample
+name: Switching to system mode and back keeps the app usable across a background cycle
+---
+# On Android 13+ system mode removes the cover window and lets the OS draw
+# the Recents card. Android 12 and lower, and iOS, keep the default cover.
+# Either way the app must come back interactable with no overlay left over.
+- launchApp:
+    clearState: false
+
+- runFlow:
+    when:
+      visible:
+        id: status-text
+        text: DISABLED
+    commands:
+      - tapOn:
+          id: toggle-cover
+- assertVisible:
+    id: status-text
+    text: ENABLED
+
+# Switch while enabled, so the mode change happens in place.
+- tapOn:
+    id: mode-system
+- tapOn:
+    id: color-indigo
+- pressKey: Home
+- launchApp
+- waitForAnimationToEnd
+- assertNotVisible:
+    id: CoverOverlay
+- tapOn:
+    id: color-crimson
+- assertVisible:
+    id: mode-text
+    text: "COLOR #7F1D1D"
+
+# Back to default while enabled, then another background cycle.
+- tapOn:
+    id: mode-default
+- pressKey: Home
+- launchApp
+- waitForAnimationToEnd
+- assertNotVisible:
+    id: CoverOverlay
+- tapOn:
+    id: color-black
+- assertVisible:
+    id: status-text

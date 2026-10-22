@@ -62,11 +62,19 @@ name: Image resize mode and position pickers update the cover
 - assertVisible:
     id: mode-text
     text: "COLOR #000000 + IMG contain/lt/full"
+- scrollUntilVisible:
+    element:
+      id: posx-right
+    direction: DOWN
 - tapOn:
     id: posx-right
 - assertVisible:
     id: mode-text
     text: "COLOR #000000 + IMG contain/rt/full"
+- scrollUntilVisible:
+    element:
+      id: posy-bottom
+    direction: DOWN
 - tapOn:
     id: posy-bottom
 - assertVisible:
