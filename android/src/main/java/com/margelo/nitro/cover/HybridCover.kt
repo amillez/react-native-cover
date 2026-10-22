@@ -215,17 +215,17 @@ class HybridCover : HybridCoverSpec() {
   @Volatile
   private var pendingUserLeaveMount: Boolean = false
 
-  /// Tracks the last-applied SCVH alpha so animation reads / status
+  /// Tracks the last-applied reveal alpha so animation reads / status
   /// queries don't need to round-trip through SurfaceFlinger. Updated
-  /// in every `trySetScvhAlpha` and in `animateScvhAlpha`'s per-frame
+  /// in every `trySetRevealAlpha` and in `animateRevealAlpha`'s per-frame
   /// callback. Main-thread writes from animation, broadcast-thread
   /// writes from fast-show — `@Volatile` so both see consistent.
   @Volatile
-  private var scvhAlphaState: Float = 0f
+  private var revealAlphaState: Float = 0f
 
-  /// In-flight SCVH alpha animator, if any. Held so a new visibility
+  /// In-flight reveal alpha animator, if any. Held so a new visibility
   /// toggle can cancel a still-running fade before starting its own.
-  private var scvhAnimator: android.animation.ValueAnimator? = null
+  private var revealAnimator: android.animation.ValueAnimator? = null
 
   /// Re-entrance guard for `detachCoverView`. Teardown calls
   /// `WindowManager.removeViewImmediate` and `safeReleaseScvh`, both of
@@ -248,7 +248,7 @@ class HybridCover : HybridCoverSpec() {
   /// Why this matters for the snapshot race:
   ///
   ///   - On `ACTION_CLOSE_SYSTEM_DIALOGS` we call
-  ///     `SurfaceControl.Transaction().setAlpha(scvhSurfaceControl, 1f).apply()`
+  ///     `SurfaceControl.Transaction().setAlpha(revealSurfaceControl, 1f).apply()`
   ///     directly from the broadcast HandlerThread.
   ///   - The transaction goes to SurfaceFlinger and is picked up on
   ///     the very next compose — no main-thread hop, no
@@ -266,7 +266,7 @@ class HybridCover : HybridCoverSpec() {
   /// it's available immediately from any thread (unlike the View-tree
   /// SurfaceControl which needs a post-attach reflection step).
   @Volatile
-  private var scvhSurfaceControl: SurfaceControl? = null
+  private var revealSurfaceControl: SurfaceControl? = null
 
   /// Process-scoped "SCVH is known broken on this device" latch.
   ///
@@ -970,7 +970,7 @@ class HybridCover : HybridCoverSpec() {
     coverHostActivityRef = WeakReference(activity)
     coverAttachedToken = targetToken
     scvhHost = host
-    scvhSurfaceControl = sc
+    revealSurfaceControl = sc
 
     if (visible) isVisible = true
     Log.i(TAG, "attachCover scvh: attached size=${width}x${height} visible=$visible sc=ok")
@@ -1163,16 +1163,16 @@ class HybridCover : HybridCoverSpec() {
   /// applied. Callers should fall back to the View-tree alpha path
   /// when this returns false (e.g. legacy attach, pre-API-30, or
   /// SCVH creation failed earlier).
-  private fun trySetScvhAlpha(alpha: Float): Boolean {
-    val sc = scvhSurfaceControl ?: return false
+  private fun trySetRevealAlpha(alpha: Float): Boolean {
+    val sc = revealSurfaceControl ?: return false
     return try {
       SurfaceControl.Transaction()
         .setAlpha(sc, alpha)
         .apply()
-      scvhAlphaState = alpha
+      revealAlphaState = alpha
       true
     } catch (e: Throwable) {
-      Log.w(TAG, "trySetScvhAlpha($alpha) failed: $e")
+      Log.w(TAG, "trySetRevealAlpha($alpha) failed: $e")
       false
     }
   }
@@ -1181,9 +1181,9 @@ class HybridCover : HybridCoverSpec() {
   /// over `duration`. Uses a ValueAnimator + per-frame
   /// `SurfaceControl.Transaction` (one binder per ~16 ms). Runs on
   /// main; cancels any in-flight animation before starting.
-  private fun animateScvhAlpha(sc: SurfaceControl, target: Float, duration: Long) {
-    scvhAnimator?.cancel()
-    val from = scvhAlphaState
+  private fun animateRevealAlpha(sc: SurfaceControl, target: Float, duration: Long) {
+    revealAnimator?.cancel()
+    val from = revealAlphaState
     if (from == target) return
     val animator = android.animation.ValueAnimator.ofFloat(from, target).apply {
       this.duration = duration
@@ -1192,7 +1192,7 @@ class HybridCover : HybridCoverSpec() {
         val a = va.animatedValue as Float
         try {
           SurfaceControl.Transaction().setAlpha(sc, a).apply()
-          scvhAlphaState = a
+          revealAlphaState = a
         } catch (_: Throwable) {
           // Surface gone mid-animation — just stop trying.
           cancel()
@@ -1200,14 +1200,14 @@ class HybridCover : HybridCoverSpec() {
       }
       addListener(object : AnimatorListenerAdapter() {
         override fun onAnimationEnd(animation: Animator) {
-          if (scvhAnimator === this@apply) scvhAnimator = null
+          if (revealAnimator === this@apply) revealAnimator = null
         }
         override fun onAnimationCancel(animation: Animator) {
-          if (scvhAnimator === this@apply) scvhAnimator = null
+          if (revealAnimator === this@apply) revealAnimator = null
         }
       })
     }
-    scvhAnimator = animator
+    revealAnimator = animator
     animator.start()
   }
 
@@ -1220,7 +1220,7 @@ class HybridCover : HybridCoverSpec() {
     val view = coverView ?: return
     val activity = coverHostActivityRef?.get() ?: return
     val params = view.layoutParams as? WindowManager.LayoutParams ?: return
-    val scvh = scvhSurfaceControl
+    val scvh = revealSurfaceControl
     Log.i(TAG, "setCoverVisibility: visible=$visible animated=$animated scvh=${scvh != null} t=${SystemClock.uptimeMillis()}")
 
     // Blur mode: re-capture the underlying surface so the bitmap
@@ -1240,11 +1240,11 @@ class HybridCover : HybridCoverSpec() {
       // what gives us the deterministic win over the legacy
       // view.alpha path on devices where reflection is blocked and
       // the snapshot fires inside the first vsync after onPause.
-      if (duration > 0 && scvhAlphaState != target) {
-        animateScvhAlpha(scvh, target, duration)
+      if (duration > 0 && revealAlphaState != target) {
+        animateRevealAlpha(scvh, target, duration)
       } else {
-        scvhAnimator?.cancel()
-        trySetScvhAlpha(target)
+        revealAnimator?.cancel()
+        trySetRevealAlpha(target)
       }
     } else {
       // Legacy path: View.alpha on the cover Window's root view.
@@ -1484,8 +1484,8 @@ class HybridCover : HybridCoverSpec() {
       // (the view is being discarded anyway).
       (content as? FreezableFrameLayout)?.frozen = true
 
-      scvhAnimator?.cancel()
-      scvhAnimator = null
+      revealAnimator?.cancel()
+      revealAnimator = null
       view.animate().cancel()
       view.animate().setListener(null)
 
@@ -1496,8 +1496,8 @@ class HybridCover : HybridCoverSpec() {
       coverHostActivityRef = null
       coverAttachedToken = null
       scvhHost = null
-      scvhSurfaceControl = null
-      scvhAlphaState = 0f
+      revealSurfaceControl = null
+      revealAlphaState = 0f
 
       // Cancel pending traversals on the SCVH's internal ViewRootImpl
       // BEFORE removing the enclosing SurfaceView. Removing the parent
@@ -1956,7 +1956,7 @@ class HybridCover : HybridCoverSpec() {
         // SurfaceFlinger compose, and require no main-thread hop —
         // so this lands before the recents-thumbnail snapshot
         // regardless of how busy the RN main thread is.
-        val scvhApplied = trySetScvhAlpha(1f)
+        val scvhApplied = trySetRevealAlpha(1f)
         Log.i(TAG, "broadcast: fast scvh=$scvhApplied dt=${SystemClock.uptimeMillis() - recvAt}ms")
 
         // Arm the synchronous-onPause path *before* hopping to main.
