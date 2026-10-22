@@ -12,6 +12,7 @@
 -   Android: remove the reflective `ViewRootImpl` `SurfaceControl` fast path. It set alpha on a transparent buffer, and Android 14+ blocks the reflection.
 -   Android: clear the pending leave flag when the activity resumes. Home and Recents often send their broadcast twice, and the stale flag made the next pause without a broadcast, such as a runtime permission dialog, mount the cover behind the dialog.
 -   Android: only one cover is armed per process. A new instance's `enable()`, such as the one after a JS or OTA reload, disables the previous instance, and `disable()` now shuts down the image loader thread. Before, every reload could leave one more receiver, window or thread behind.
+-   Android: remove a cover window that is replaced before its first frame. The teardown checked the window token, which only arrives with the first traversal, so a burst of `setColor` calls on an enabled cover left one full-screen window attached per call (5 calls, 5 windows on an API 34 emulator). The check dates from v0.1.6.
 -   Android: `enable()` restarts an image load that `disable()` interrupted, so the cover no longer stays without its image until `setImage` runs again.
 -   Android: stop requesting the display's highest refresh rate. The cover window stays attached for the whole session, so the request held 90 and 120 Hz screens at their top rate.
 -   Docs: list the Android limitations, including leaves with no Home or Recents signal, which the cover cannot catch.
