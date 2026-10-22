@@ -5,7 +5,8 @@
 -   Android: reveal the cover without waiting for an app frame. On API 29+ (except blur mode) the cover is drawn ahead of time into a child `SurfaceControl` of the cover window's `SurfaceView`, and the leave broadcast reveals it by setting that control's alpha from the receiver thread. Before, the reveal set `View.alpha` and needed a main-thread draw, which the Recents snapshot often beat: on an API 34 emulator the example app showed its UI in 3 of 20 Home presses. Now 20 of 20 on API 34 and API 32. The hidden cover is no longer composited.
 -   Android: remove the reflective `ViewRootImpl` `SurfaceControl` fast path. It set alpha on a transparent buffer, and Android 14+ blocks the reflection.
 -   Android: clear the pending leave flag when the activity resumes. Home and Recents often send their broadcast twice, and the stale flag made the next pause without a broadcast, such as a runtime permission dialog, mount the cover behind the dialog.
--   Android: shut down the image loader thread in `disable()`. Each JS reload, including an OTA reload, left one thread behind.
+-   Android: only one cover is armed per process. A new instance's `enable()`, such as the one after a JS or OTA reload, disables the previous instance, and `disable()` now shuts down the image loader thread. Before, every reload could leave one more receiver, window or thread behind.
+-   Android: `enable()` restarts an image load that `disable()` interrupted, so the cover no longer stays without its image until `setImage` runs again.
 -   Android: stop requesting the display's highest refresh rate. The cover window stays attached for the whole session, so the request held 90 and 120 Hz screens at their top rate.
 -   Docs: list the Android limitations, including leaves with no Home or Recents signal, which the cover cannot catch.
 
