@@ -396,7 +396,10 @@ class HybridCover : HybridCoverSpec() {
         app.unregisterActivityLifecycleCallbacks(callbacks)
       }
       unregisterSystemDialogReceiver(app)
-      imageLoader?.cancelInflight()
+      // Each JS reload creates a new HybridCover, so a loader left running
+      // here would leak its thread once per reload.
+      imageLoader?.shutdown()
+      imageLoader = null
       uninstallActivityFocusListener()
       removeCoverImmediately()
       // Reset so the next enable() seeds from a clean slate.
