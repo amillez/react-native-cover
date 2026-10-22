@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 - 2026-10-22
+
+-   New `Cover.setMode("default" | "system")`. In `"system"` mode on Android 13+ (API 33) the activity opts out of Recents screenshots and Android draws a plain card in the cover color, through the `TaskDescription` background color. No cover window or broadcast receiver is installed, so there is no race with the snapshot, and leaving to another app is covered too. Image and blur are not shown in this mode. iOS and Android 12 and lower ignore it and keep the default cover. Verified on an API 34 emulator: 10 of 10 Home presses and 3 of 3 opens of another app showed the configured color, and `disable()` restored real screenshots.
+-   Example app: a Mode picker, and a Maestro flow that switches modes while the cover is enabled.
+
 ## 0.1.11 - 2026-10-22
 
 -   Android: reveal the cover without waiting for an app frame. On API 29+ (except blur mode) the cover is drawn ahead of time into a child `SurfaceControl` of the cover window's `SurfaceView`, and the leave broadcast reveals it by setting that control's alpha from the receiver thread. Before, the reveal set `View.alpha` and needed a main-thread draw, which the Recents snapshot often beat: on an API 34 emulator the example app showed its UI in 3 of 20 Home presses. Now 20 of 20 on API 34 and API 32. The hidden cover is no longer composited.

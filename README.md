@@ -9,6 +9,7 @@ Built with [Nitro Modules](https://nitro.margelo.com/).
 
 ## Features
 
+-   **System mode on Android 13+** — `setMode("system")` asks Android not to screenshot the app for Recents and has it draw a plain card in the cover color. No cover window, no race with the snapshot, and it also covers leaving to another app.
 -   **Native lifecycle hooks** — mounts the cover synchronously from `applicationDidEnterBackground` (iOS) and `ACTION_CLOSE_SYSTEM_DIALOGS` (Android), before the OS captures the App Switcher / Recents thumbnail.
 -   **Four content modes** — solid color, image, image-on-color, or blur. Modes are mutually exclusive and switch in place.
 -   **Configurable image overlay** — `resizeMode`, anchor (`x` / `y`), and explicit `width` / `height` for badge-style placement. Decoded off the main thread; bitmap is held so re-mounts paint instantly.
@@ -59,6 +60,10 @@ import { Cover } from "react-native-cover";
 // app goes to background and removed when it comes back to foreground.
 Cover.enable();
 
+// Optional: on Android 13+, let the OS draw a plain card in the cover
+// color instead of mounting a cover view. See "Modes" below.
+Cover.setMode("system");
+
 // Background color — opaque black by default. Use #00000000 for a
 // transparent background under an image-only cover. Accepts #RGB,
 // #RRGGBB, and #RRGGBBAA.
@@ -97,6 +102,32 @@ Cover.isEnabled;
 Cover.isVisible;
 Cover.show();
 Cover.hide();
+```
+
+### Modes
+
+`setMode` chooses how the cover hides the app. It defaults to `"default"`, and can be called before or after `enable()`. While enabled, the cover switches to the new mode in place.
+
+| Platform | `"default"` | `"system"` |
+| --- | --- | --- |
+| Android 13+ (API 33) | Cover view with color, image or blur | The OS draws a plain card in the cover color |
+| Android 12 and lower | Cover view with color, image or blur | Ignored, same as `"default"` |
+| iOS | Cover view with color, image or blur | Ignored, same as `"default"` |
+
+In `"system"` mode on Android 13+, the activity calls `setRecentsScreenshotEnabled(false)`, so Android never takes a Recents screenshot of the app. Android then draws the Recents card itself, filled with the task's background color, and the mode sets that color to the cover color. This has three effects:
+
+-   No cover window or broadcast receiver is installed, so there is no race with the snapshot.
+-   It covers every way of leaving the app, including the ones the default mode cannot catch on Android, such as opening another app from yours. See [Android: known limitations](#android-known-limitations).
+-   The card shows only the color. `setImage` and `setBlur` have no visible effect in this mode, and `setBlur` leaves the card black, because it resets the color. The color's alpha is ignored, since Android requires an opaque card.
+
+The mode sets the activity's `TaskDescription` to one that only carries the background color. If your app sets its own `TaskDescription` (label, icon or colors), set it again after enabling the cover. `disable()` restores Recents screenshots and the theme's `android:colorBackground` on every activity the mode touched.
+
+iOS has no equivalent OS mechanism. Its default cover already mounts in `applicationDidEnterBackground`, before the App Switcher snapshot is taken. For a plain color on both platforms, call `setColor` without `setImage` and set the mode to `"system"`.
+
+```tsx
+Cover.setColor("#5F8AFA");
+Cover.setMode("system");
+Cover.enable();
 ```
 
 ### Content combinations
@@ -222,6 +253,7 @@ import type { CoverModule } from "react-native-cover";
     -   otherwise → container's background is the color; if an image is set, an `ImageView` is added as a child with a `LayoutParams(w, h, gravity)` computed from `width` / `height` (DIP-converted) and `x` / `y`.
 -   Images are decoded off the main thread by a single-thread executor and the bitmap is held alongside the current image config; in-flight HTTP fetches are cancelled when `setImage` is called again with a different URI.
 -   All JS-thread setters dispatch through the main `Handler`, so the JS thread is never blocked.
+-   In `"system"` mode on Android 13+, `enable()` registers only an `ActivityLifecycleCallbacks` that calls `setRecentsScreenshotEnabled(false)` and sets the `TaskDescription` background color on every created activity (`SystemRecentsCover.kt`). No window is added and no broadcast receiver is registered.
 -   The container's `tag` and `contentDescription` are both `"CoverOverlay"` / `"Privacy cover"` so it can be located by accessibility tooling and e2e tests.
 
 ### Why not iOS `willResignActive` / Android `onPause`?
@@ -234,7 +266,7 @@ Android does not have a direct equivalent in `Application.ActivityLifecycleCallb
 
 ### Android: known limitations
 
-These apply to the cover on Android.
+These apply to the default mode on Android. On Android 13+ the `"system"` mode avoids all of them except the reflection note, and shows only a plain color.
 
 -   **The cover only reacts to Home, Recents and Assist.** It mounts on the `ACTION_CLOSE_SYSTEM_DIALOGS` broadcast for those keys and gestures, with `onActivityStopped` as a backup. Any other way of leaving the app has no early signal. Examples are opening another app from inside yours (a share target, an external link, a browser), the screen turning off, an incoming call, and a programmatic `startActivity` to another app. In those cases Android takes the Recents screenshot before `onActivityStopped`, so the thumbnail can show your app's content. iOS does not have this gap, because any switch to another app backgrounds yours and fires `applicationDidEnterBackground`.
 -   **On API 24–28 and in blur mode the reveal still needs an app frame.** The cover becomes visible only after the main thread draws it, so a busy main thread can lose the race with the Recents screenshot.
