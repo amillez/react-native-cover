@@ -44,6 +44,10 @@ abstract class HybridCoverSpec: HybridObject() {
   
   @DoNotStrip
   @Keep
+  abstract fun setMode(mode: CoverMode): Unit
+  
+  @DoNotStrip
+  @Keep
   abstract fun setColor(hex: String): Unit
   
   @DoNotStrip

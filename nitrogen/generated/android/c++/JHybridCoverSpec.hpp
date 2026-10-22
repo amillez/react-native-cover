@@ -57,6 +57,7 @@ namespace margelo::nitro::cover {
     // Methods
     void enable() override;
     void disable() override;
+    void setMode(CoverMode mode) override;
     void setColor(const std::string& hex) override;
     void setImage(const CoverImageOptions& options) override;
     void clearImage() override;

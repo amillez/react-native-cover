@@ -18,6 +18,7 @@ namespace margelo::nitro::cover {
       prototype.registerHybridGetter("isVisible", &HybridCoverSpec::getIsVisible);
       prototype.registerHybridMethod("enable", &HybridCoverSpec::enable);
       prototype.registerHybridMethod("disable", &HybridCoverSpec::disable);
+      prototype.registerHybridMethod("setMode", &HybridCoverSpec::setMode);
       prototype.registerHybridMethod("setColor", &HybridCoverSpec::setColor);
       prototype.registerHybridMethod("setImage", &HybridCoverSpec::setImage);
       prototype.registerHybridMethod("clearImage", &HybridCoverSpec::clearImage);

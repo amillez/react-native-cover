@@ -141,6 +141,10 @@ final class HybridCover: HybridCoverSpec {
 
   // MARK: - Mode setters
 
+  /// iOS has no OS-drawn App Switcher placeholder, so `.system` keeps the
+  /// cover window, which already mounts before the snapshot is taken.
+  func setMode(mode: CoverMode) throws {}
+
   func setColor(hex: String) throws {
     let color = UIColor(coverHex: hex) ?? .black
     DispatchQueue.main.async { [weak self] in

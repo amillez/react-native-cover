@@ -38,9 +38,12 @@ import android.view.animation.Interpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.annotation.Keep
+import androidx.annotation.RequiresApi
 import com.facebook.proguard.annotations.DoNotStrip
 import com.margelo.nitro.NitroModules
 import java.lang.ref.WeakReference
+import java.util.Collections
+import java.util.WeakHashMap
 
 private data class ImageConfig(
   val uri: String,
@@ -338,6 +341,21 @@ class HybridCover : HybridCoverSpec() {
   private var activityFocusListener: ViewTreeObserver.OnWindowFocusChangeListener? = null
   private var activityFocusDecor: WeakReference<View>? = null
 
+  private var mode: CoverMode = CoverMode.DEFAULT
+
+  /// Lifecycle callbacks of the active system mode, null when the overlay
+  /// path is the one enabled. Which path `disable()` tears down follows
+  /// this, not `mode`, so a mode switch can never leave the other armed.
+  private var systemCallbacks: Application.ActivityLifecycleCallbacks? = null
+
+  /// Activities system mode has applied to, so `disable()` restores every
+  /// one still alive, not only the current one.
+  private val systemActivities: MutableSet<Activity> =
+    Collections.newSetFromMap(WeakHashMap())
+
+  private val usesSystemMode: Boolean
+    get() = mode == CoverMode.SYSTEM && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+
   private val mainHandler = Handler(Looper.getMainLooper())
   private var imageLoader: CoverImageLoader? = null
 
@@ -352,61 +370,129 @@ class HybridCover : HybridCoverSpec() {
   // MARK: - Lifecycle
 
   override fun enable() {
-    mainHandler.post {
-      if (isEnabled) return@post
-      val app = applicationOrNull() ?: return@post
-      isEnabled = true
-      // Seed the started-activity count. enable() typically runs at
-      // app startup, after the host activity's onStart already fired
-      // and before our callbacks were registered — so the bookkeeping
-      // starts at 0 even though one activity is actually started. If
-      // we left it at 0, a subsequent intra-app navigation A → B
-      // would drive the count from 0 (seed) → 1 (B's onStart) → 0
-      // (A's onStop), wrongly indicating "app backgrounded" and
-      // mounting the cover on top of B.
-      //
-      // We can't enumerate started activities from the public API, but
-      // we have a strong signal that *some* activity is started: a
-      // resolvable current activity. That covers the normal startup
-      // path. The count self-corrects from there as onStart/onStop
-      // pairs fire.
-      startedActivityCount = if (resolveActivity() != null) 1 else 0
-      val callbacks = createCallbacks()
-      lifecycleCallbacks = callbacks
-      app.registerActivityLifecycleCallbacks(callbacks)
-      registerSystemDialogReceiver(app)
-      // Pre-mount the cover invisible. The actual attach + first-frame
-      // draw happens NOW, while the activity is fully foregrounded —
-      // so when the user hits Home the recents thumbnail snapshot
-      // already includes a drawn cover surface and we just toggle
-      // alpha. Without this, addView fired from the broadcast handler
-      // frequently misses the snapshot because the snapshot is
-      // captured before the cover's first frame finishes rendering.
-      ensurePreMounted()
+    mainHandler.post { enableOnMain() }
+  }
+
+  private fun enableOnMain() {
+    if (isEnabled) return
+    val app = applicationOrNull() ?: return
+    isEnabled = true
+    if (usesSystemMode) {
+      enableSystemMode(app)
+      return
     }
+    // Seed the started-activity count. enable() typically runs at
+    // app startup, after the host activity's onStart already fired
+    // and before our callbacks were registered — so the bookkeeping
+    // starts at 0 even though one activity is actually started. If
+    // we left it at 0, a subsequent intra-app navigation A → B
+    // would drive the count from 0 (seed) → 1 (B's onStart) → 0
+    // (A's onStop), wrongly indicating "app backgrounded" and
+    // mounting the cover on top of B.
+    //
+    // We can't enumerate started activities from the public API, but
+    // we have a strong signal that *some* activity is started: a
+    // resolvable current activity. That covers the normal startup
+    // path. The count self-corrects from there as onStart/onStop
+    // pairs fire.
+    startedActivityCount = if (resolveActivity() != null) 1 else 0
+    val callbacks = createCallbacks()
+    lifecycleCallbacks = callbacks
+    app.registerActivityLifecycleCallbacks(callbacks)
+    registerSystemDialogReceiver(app)
+    // Pre-mount the cover invisible. The actual attach + first-frame
+    // draw happens NOW, while the activity is fully foregrounded —
+    // so when the user hits Home the recents thumbnail snapshot
+    // already includes a drawn cover surface and we just toggle
+    // alpha. Without this, addView fired from the broadcast handler
+    // frequently misses the snapshot because the snapshot is
+    // captured before the cover's first frame finishes rendering.
+    ensurePreMounted()
   }
 
   override fun disable() {
-    mainHandler.post {
-      if (!isEnabled) return@post
-      isEnabled = false
-      val app = applicationOrNull()
-      val callbacks = lifecycleCallbacks
-      lifecycleCallbacks = null
-      if (app != null && callbacks != null) {
-        app.unregisterActivityLifecycleCallbacks(callbacks)
-      }
-      unregisterSystemDialogReceiver(app)
-      // Each JS reload creates a new HybridCover, so a loader left running
-      // here would leak its thread once per reload.
-      imageLoader?.shutdown()
-      imageLoader = null
-      uninstallActivityFocusListener()
-      removeCoverImmediately()
-      // Reset so the next enable() seeds from a clean slate.
-      startedActivityCount = 0
-      pendingUserLeaveMount = false
+    mainHandler.post { disableOnMain() }
+  }
+
+  private fun disableOnMain() {
+    if (!isEnabled) return
+    isEnabled = false
+    val app = applicationOrNull()
+    // Each JS reload creates a new HybridCover, so a loader left running
+    // here would leak its thread once per reload.
+    imageLoader?.shutdown()
+    imageLoader = null
+    if (systemCallbacks != null) {
+      disableSystemMode(app)
+      return
     }
+    val callbacks = lifecycleCallbacks
+    lifecycleCallbacks = null
+    if (app != null && callbacks != null) {
+      app.unregisterActivityLifecycleCallbacks(callbacks)
+    }
+    unregisterSystemDialogReceiver(app)
+    uninstallActivityFocusListener()
+    removeCoverImmediately()
+    // Reset so the next enable() seeds from a clean slate.
+    startedActivityCount = 0
+    pendingUserLeaveMount = false
+  }
+
+  override fun setMode(mode: CoverMode) {
+    mainHandler.post {
+      val wasSystem = usesSystemMode
+      this.mode = mode
+      if (isEnabled && wasSystem != usesSystemMode) {
+        disableOnMain()
+        enableOnMain()
+      }
+    }
+  }
+
+  @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+  private fun enableSystemMode(app: Application) {
+    val callbacks = object : Application.ActivityLifecycleCallbacks {
+      override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+        applySystemMode(activity)
+      }
+      override fun onActivityStarted(activity: Activity) {}
+      override fun onActivityResumed(activity: Activity) {
+        currentActivityRef = WeakReference(activity)
+      }
+      override fun onActivityPaused(activity: Activity) {}
+      override fun onActivityStopped(activity: Activity) {}
+      override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+      override fun onActivityDestroyed(activity: Activity) {
+        systemActivities.remove(activity)
+      }
+    }
+    systemCallbacks = callbacks
+    app.registerActivityLifecycleCallbacks(callbacks)
+    resolveActivity()?.let { applySystemMode(it) }
+  }
+
+  @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+  private fun applySystemMode(activity: Activity) {
+    SystemRecentsCover.apply(activity, backgroundColor)
+    systemActivities.add(activity)
+  }
+
+  private fun disableSystemMode(app: Application?) {
+    val callbacks = systemCallbacks
+    systemCallbacks = null
+    if (app != null && callbacks != null) {
+      app.unregisterActivityLifecycleCallbacks(callbacks)
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      systemActivities.toList().forEach { SystemRecentsCover.clear(it) }
+    }
+    systemActivities.clear()
+  }
+
+  private fun refreshSystemModeColor() {
+    if (systemCallbacks == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    systemActivities.toList().forEach { SystemRecentsCover.apply(it, backgroundColor) }
   }
 
   // MARK: - Mode setters
@@ -416,6 +502,7 @@ class HybridCover : HybridCoverSpec() {
     mainHandler.post {
       backgroundColor = parsed
       blurStyle = null
+      refreshSystemModeColor()
       refreshCoverContentIfMounted()
     }
   }
@@ -491,6 +578,7 @@ class HybridCover : HybridCoverSpec() {
       // from a clean slate.
       backgroundColor = Color.BLACK
       imageConfig = null
+      refreshSystemModeColor()
       // Fast path: same style, only intensity changed → mutate the
       // RenderEffect on the existing blur view instead of rebuilding.
       val view = coverView

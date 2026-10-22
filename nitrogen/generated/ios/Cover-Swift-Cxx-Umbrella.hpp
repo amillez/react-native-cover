@@ -14,6 +14,8 @@ namespace margelo::nitro::cover { enum class CoverBlurStyle; }
 namespace margelo::nitro::cover { enum class CoverEasing; }
 // Forward declaration of `CoverImageOptions` to properly resolve imports.
 namespace margelo::nitro::cover { struct CoverImageOptions; }
+// Forward declaration of `CoverMode` to properly resolve imports.
+namespace margelo::nitro::cover { enum class CoverMode; }
 // Forward declaration of `CoverPositionX` to properly resolve imports.
 namespace margelo::nitro::cover { enum class CoverPositionX; }
 // Forward declaration of `CoverPositionY` to properly resolve imports.
@@ -27,6 +29,7 @@ namespace margelo::nitro::cover { class HybridCoverSpec; }
 #include "CoverBlurStyle.hpp"
 #include "CoverEasing.hpp"
 #include "CoverImageOptions.hpp"
+#include "CoverMode.hpp"
 #include "CoverPositionX.hpp"
 #include "CoverPositionY.hpp"
 #include "CoverResizeMode.hpp"

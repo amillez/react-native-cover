@@ -12,6 +12,8 @@
 // Forward declaration of `HybridCoverSpec_cxx` to properly resolve imports.
 namespace Cover { class HybridCoverSpec_cxx; }
 
+// Forward declaration of `CoverMode` to properly resolve imports.
+namespace margelo::nitro::cover { enum class CoverMode; }
 // Forward declaration of `CoverImageOptions` to properly resolve imports.
 namespace margelo::nitro::cover { struct CoverImageOptions; }
 // Forward declaration of `CoverResizeMode` to properly resolve imports.
@@ -25,6 +27,7 @@ namespace margelo::nitro::cover { enum class CoverBlurStyle; }
 // Forward declaration of `CoverEasing` to properly resolve imports.
 namespace margelo::nitro::cover { enum class CoverEasing; }
 
+#include "CoverMode.hpp"
 #include <string>
 #include "CoverImageOptions.hpp"
 #include "CoverResizeMode.hpp"
@@ -97,6 +100,12 @@ namespace margelo::nitro::cover {
     }
     inline void disable() override {
       auto __result = _swiftPart.disable();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline void setMode(CoverMode mode) override {
+      auto __result = _swiftPart.setMode(static_cast<int>(mode));
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }
