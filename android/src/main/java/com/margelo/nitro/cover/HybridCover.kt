@@ -1835,7 +1835,7 @@ class HybridCover : HybridCoverSpec() {
           revealSurfaceControl = next
           old
         }
-        previous?.release()
+        previous?.let { removeSurface(it) }
         val fade = pendingSurfaceFadeInMs
         if (fade > 0) {
           pendingSurfaceFadeInMs = 0
@@ -1850,7 +1850,7 @@ class HybridCover : HybridCoverSpec() {
           child = null
           c
         }
-        old?.release()
+        old?.let { removeSurface(it) }
       }
     })
     return FreezableFrameLayout(activity).apply {
@@ -1868,6 +1868,17 @@ class HybridCover : HybridCoverSpec() {
         ),
       )
     }
+  }
+
+  // release() only drops our reference: the layer stays on screen while its
+  // parent lives, so it is detached first.
+  private fun removeSurface(control: SurfaceControl) {
+    try {
+      SurfaceControl.Transaction().reparent(control, null).apply()
+    } catch (e: Throwable) {
+      Log.w(TAG, "removeSurface: reparent failed: $e")
+    }
+    control.release()
   }
 
   private fun drawCoverContent(target: SurfaceControl, content: View, width: Int, height: Int) {
