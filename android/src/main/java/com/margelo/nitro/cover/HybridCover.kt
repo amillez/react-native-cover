@@ -432,6 +432,8 @@ class HybridCover : HybridCoverSpec() {
     imageLoader = null
     if (systemCallbacks != null) {
       disableSystemMode(app)
+      // show() still mounts a cover view in system mode.
+      removeCoverImmediately()
       return
     }
     val callbacks = lifecycleCallbacks
@@ -464,7 +466,11 @@ class HybridCover : HybridCoverSpec() {
       override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
         applySystemMode(activity)
       }
-      override fun onActivityStarted(activity: Activity) {}
+      // Activities already in the back stack when the mode was enabled get
+      // no onActivityCreated; cover them when they come back to the front.
+      override fun onActivityStarted(activity: Activity) {
+        if (activity !in systemActivities) applySystemMode(activity)
+      }
       override fun onActivityResumed(activity: Activity) {
         currentActivityRef = WeakReference(activity)
       }
