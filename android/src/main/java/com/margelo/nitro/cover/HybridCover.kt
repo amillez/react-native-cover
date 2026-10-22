@@ -1905,6 +1905,11 @@ class HybridCover : HybridCoverSpec() {
 
       override fun onActivityResumed(activity: Activity) {
         currentActivityRef = WeakReference(activity)
+        // Home and Recents often send the leave broadcast twice, and the
+        // second one re-arms the flag after the cover is already up. Left
+        // set, it would mount the cover on the next pause that has no
+        // broadcast, such as a runtime permission dialog.
+        pendingUserLeaveMount = false
         // Window's decor is guaranteed attached by onResume; if
         // pre-mount missed it on Started (token was null), retry.
         ensurePreMounted()
