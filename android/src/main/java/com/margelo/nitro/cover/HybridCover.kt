@@ -376,6 +376,11 @@ class HybridCover : HybridCoverSpec() {
   private fun enableOnMain() {
     if (isEnabled) return
     val app = applicationOrNull() ?: return
+    // A JS reload creates a new HybridCover while the old one is still
+    // registered with the Application. Only one may be armed per process,
+    // or every reload would add another cover window, receiver and thread.
+    activeInstance?.get()?.takeIf { it !== this }?.disableOnMain()
+    activeInstance = WeakReference(this)
     isEnabled = true
     if (usesSystemMode) {
       enableSystemMode(app)
@@ -408,6 +413,8 @@ class HybridCover : HybridCoverSpec() {
     // frequently misses the snapshot because the snapshot is
     // captured before the cover's first frame finishes rendering.
     ensurePreMounted()
+    // A disable() cancels an image that was still loading; fetch it again.
+    imageConfig?.takeIf { it.bitmap == null }?.let { loadImage(it) }
   }
 
   override fun disable() {
@@ -417,6 +424,7 @@ class HybridCover : HybridCoverSpec() {
   private fun disableOnMain() {
     if (!isEnabled) return
     isEnabled = false
+    if (activeInstance?.get() === this) activeInstance = null
     val app = applicationOrNull()
     // Each JS reload creates a new HybridCover, so a loader left running
     // here would leak its thread once per reload.
@@ -537,22 +545,25 @@ class HybridCover : HybridCoverSpec() {
       imageConfig = config
       blurStyle = null
       refreshCoverContentIfMounted()
-      if (existing == null) {
-        // Pass the box size in pixels so the loader can downsample the
-        // decoded bitmap. `0` (cover-fills-axis) maps to "use the full
-        // screen on that axis", which the loader resolves itself.
-        val dm = (resolveActivity()?.resources ?: applicationOrNull()?.resources)
-          ?.displayMetrics
-        val density = dm?.density ?: 1f
-        val targetWPx = if (width > 0) (width * density).toInt() else 0
-        val targetHPx = if (height > 0) (height * density).toInt() else 0
-        ensureImageLoader()?.load(uri, targetWPx, targetHPx) { bitmap ->
-          val current = imageConfig
-          if (bitmap != null && current?.uri == uri) {
-            imageConfig = current.copy(bitmap = bitmap)
-            refreshCoverContentIfMounted()
-          }
-        }
+      if (existing == null) loadImage(config)
+    }
+  }
+
+  private fun loadImage(config: ImageConfig) {
+    // Pass the box size in pixels so the loader can downsample the decoded
+    // bitmap. `0` (cover-fills-axis) maps to "use the full screen on that
+    // axis", which the loader resolves itself.
+    val dm = (resolveActivity()?.resources ?: applicationOrNull()?.resources)
+      ?.displayMetrics
+    val density = dm?.density ?: 1f
+    val targetWPx = if (config.width > 0) (config.width * density).toInt() else 0
+    val targetHPx = if (config.height > 0) (config.height * density).toInt() else 0
+    val uri = config.uri
+    ensureImageLoader()?.load(uri, targetWPx, targetHPx) { bitmap ->
+      val current = imageConfig
+      if (bitmap != null && current?.uri == uri) {
+        imageConfig = current.copy(bitmap = bitmap)
+        refreshCoverContentIfMounted()
       }
     }
   }
@@ -1918,6 +1929,9 @@ class HybridCover : HybridCoverSpec() {
           .apply()
         drawCoverContent(next, content, width, height)
         val previous = synchronized(revealLock) {
+          // The receiver may have revealed the old layer while this one was
+          // drawn. Carry its latest alpha over before publishing.
+          SurfaceControl.Transaction().setAlpha(next, revealAlphaState).apply()
           val old = child
           child = next
           revealSurfaceControl = next
@@ -2229,6 +2243,9 @@ class HybridCover : HybridCoverSpec() {
     currentActivityRef?.get() ?: NitroModules.applicationContext?.currentActivity
 
   companion object {
+    // Main-thread only.
+    private var activeInstance: WeakReference<HybridCover>? = null
+
     private const val TAG = "Cover"
     private const val COVER_TAG = "CoverOverlay"
     private const val COVER_LABEL = "Privacy cover"
