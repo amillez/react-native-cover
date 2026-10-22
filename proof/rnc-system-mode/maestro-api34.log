@@ -1,0 +1,15 @@
+
+Waiting for flows to complete...
+[Passed] Switching to system mode and back keeps the app usable across a background cycle (25s)
+[Passed] Manual show/hide of cover via JS API (22s)
+[Passed] Cover survives background/foreground cycle without leaking the overlay (13s)
+[Passed] Image resize mode and position pickers update the cover (50s)
+[Passed] Cover toggle and color change (17s)
+[Passed] Color + image combine; setBlur replaces both (41s)
+[Passed] Keyboard input still works while the cover is enabled (27s)
+[Passed] Cover paints above an open RN <Modal> Dialog (19s)
+[Passed] Blur intensity picker updates the cover (27s)
+[Passed] Fade animation does not break show/hide (20s)
+
+10/10 Flows Passed in 4m 21s
+
