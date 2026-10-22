@@ -1536,7 +1536,12 @@ class HybridCover : HybridCoverSpec() {
       // where immediate removal throws (some Samsung / MIUI builds
       // reject removeViewImmediate when the view is in a transitional
       // state).
-      if (view.windowToken != null) {
+      //
+      // `parent` is set by addView itself, while `windowToken` only arrives
+      // with the first traversal. Checking the token skipped windows that
+      // were added and replaced within one frame, such as a burst of
+      // setColor calls, and each one stayed attached for good.
+      if (view.parent != null) {
         val removed = try {
           activity?.windowManager?.removeViewImmediate(view)
           true
