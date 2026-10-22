@@ -789,24 +789,6 @@ class HybridCover : HybridCoverSpec() {
         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
       }
     }
-    // Ask the OS to compose at the display's highest supported refresh
-    // rate while the cover panel is attached. Shorter vsync interval ⇒
-    // less wall-clock time between our `view.alpha = 1` and the next
-    // SurfaceFlinger compose that lands the alpha=1 buffer for the
-    // recents-thumbnail snapshot. At 120Hz the pipeline (2 vsyncs ≈
-    // 17 ms) fits inside the snapshot race window observed on tight
-    // devices; at 60Hz (33 ms) it doesn't. No-op on panels that don't
-    // support a higher rate.
-    val maxRate = activity.windowManager.defaultDisplay
-      ?.supportedModes
-      ?.maxOfOrNull { it.refreshRate }
-      ?: 0f
-    if (maxRate > 0f) {
-      params.preferredRefreshRate = maxRate
-      Log.i(TAG, "attachCover: preferredRefreshRate=$maxRate (modes=${
-        activity.windowManager.defaultDisplay?.supportedModes?.joinToString { "${it.refreshRate}Hz" }
-      })")
-    }
 
     try {
       activity.windowManager.addView(view, params)
@@ -1198,13 +1180,6 @@ class HybridCover : HybridCoverSpec() {
       } else {
         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
       }
-    }
-    val maxRate = activity.windowManager.defaultDisplay
-      ?.supportedModes
-      ?.maxOfOrNull { it.refreshRate }
-      ?: 0f
-    if (maxRate > 0f) {
-      params.preferredRefreshRate = maxRate
     }
     return params
   }
