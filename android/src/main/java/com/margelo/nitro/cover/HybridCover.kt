@@ -215,22 +215,6 @@ class HybridCover : HybridCoverSpec() {
   @Volatile
   private var pendingUserLeaveMount: Boolean = false
 
-  /// SurfaceControl backing the cover panel's window. Captured via
-  /// reflection (see `SurfaceControlAccess`) after the first traversal
-  /// completes, so we can apply alpha=1 directly via
-  /// `SurfaceControl.Transaction` from the broadcast's HandlerThread —
-  /// no main-thread hop, no ViewRootImpl traversal in the critical
-  /// path. Cleared on detach.
-  ///
-  /// The direct setAlpha is transient: the next ViewRootImpl traversal
-  /// (whenever it fires) will re-apply the View tree's alpha to the
-  /// SurfaceControl. So the main-thread path must STILL eventually set
-  /// `view.alpha = 1` to keep them consistent — but the snapshot
-  /// race is won as soon as the direct transaction is applied at the
-  /// next SurfaceFlinger compose, which is independent of main.
-  @Volatile
-  private var coverSurfaceControl: SurfaceControl? = null
-
   /// Tracks the last-applied SCVH alpha so animation reads / status
   /// queries don't need to round-trip through SurfaceFlinger. Updated
   /// in every `trySetScvhAlpha` and in `animateScvhAlpha`'s per-frame
@@ -798,19 +782,6 @@ class HybridCover : HybridCoverSpec() {
       coverHostActivityRef = null
       coverAttachedToken = null
       return
-    }
-
-    // Capture the SurfaceControl once ViewRootImpl has wired one up.
-    // The first traversal/layout has to complete before
-    // ViewRootImpl.mSurfaceControl is set — using `view.post` runs
-    // the resolver on the next main-thread tick, which is after the
-    // first vsync/traversal kicked off by addView. Re-runs on every
-    // attach because each addView creates a new ViewRootImpl with its
-    // own SurfaceControl.
-    view.post {
-      if (coverView !== view) return@post  // Detached / re-attached since.
-      coverSurfaceControl = SurfaceControlAccess.getSurfaceControl(view)
-      Log.i(TAG, "attachCover: SurfaceControl captured=${coverSurfaceControl != null}")
     }
 
     // Run the animation after the addView so the surface is hooked up.
@@ -1524,7 +1495,6 @@ class HybridCover : HybridCoverSpec() {
       coverContent = null
       coverHostActivityRef = null
       coverAttachedToken = null
-      coverSurfaceControl = null
       scvhHost = null
       scvhSurfaceControl = null
       scvhAlphaState = 0f
@@ -1731,28 +1701,6 @@ class HybridCover : HybridCoverSpec() {
       } catch (_: Throwable) {
         // safeReleaseScvh already swallows; defence in depth.
       }
-    }
-  }
-
-  /// Apply alpha to the cover's `SurfaceControl` directly via a
-  /// `Transaction`, bypassing the View pipeline entirely. Safe to call
-  /// from ANY thread (Transaction.apply is thread-safe).
-  ///
-  /// Returns true if a transaction was applied. The next SurfaceFlinger
-  /// compose will reflect the new alpha — independent of whether the
-  /// RN main thread is busy or when ViewRootImpl next traverses. False
-  /// if the SC isn't captured yet (pre-first-frame, or reflection
-  /// disabled) — caller falls back to the View-tree path.
-  private fun trySetSurfaceAlphaFast(alpha: Float): Boolean {
-    val sc = coverSurfaceControl ?: return false
-    return try {
-      SurfaceControl.Transaction()
-        .setAlpha(sc, alpha)
-        .apply()
-      true
-    } catch (e: Throwable) {
-      Log.w(TAG, "trySetSurfaceAlphaFast failed: $e")
-      false
     }
   }
 
@@ -1998,7 +1946,7 @@ class HybridCover : HybridCoverSpec() {
         if (intent.action != Intent.ACTION_CLOSE_SYSTEM_DIALOGS) return
         val reason = intent.getStringExtra(SYSTEM_DIALOG_REASON_KEY)
         val recvAt = SystemClock.uptimeMillis()
-        Log.i(TAG, "broadcast: reason=$reason isEnabled=$isEnabled isVisible=$isVisible sc=${coverSurfaceControl != null} t=$recvAt")
+        Log.i(TAG, "broadcast: reason=$reason isEnabled=$isEnabled isVisible=$isVisible t=$recvAt")
         if (reason !in USER_LEAVE_REASONS) return
         if (!isEnabled) return
 
@@ -2007,18 +1955,9 @@ class HybridCover : HybridCoverSpec() {
         // transactions are thread-safe, atomic at the next
         // SurfaceFlinger compose, and require no main-thread hop —
         // so this lands before the recents-thumbnail snapshot
-        // regardless of how busy the RN main thread is. Two
-        // possible SCs:
-        //   - `scvhSurfaceControl`: from `SurfaceControlViewHost`
-        //     (API 30+, public API, no reflection required). This
-        //     is the preferred path.
-        //   - `coverSurfaceControl`: reflectively captured from
-        //     ViewRootImpl. Subject to hidden-API enforcement;
-        //     fails on many shipping devices. Kept as a
-        //     belt-and-suspenders fallback.
+        // regardless of how busy the RN main thread is.
         val scvhApplied = trySetScvhAlpha(1f)
-        val coverApplied = if (!scvhApplied) trySetSurfaceAlphaFast(1f) else false
-        Log.i(TAG, "broadcast: fast scvh=$scvhApplied refl=$coverApplied dt=${SystemClock.uptimeMillis() - recvAt}ms")
+        Log.i(TAG, "broadcast: fast scvh=$scvhApplied dt=${SystemClock.uptimeMillis() - recvAt}ms")
 
         // Arm the synchronous-onPause path *before* hopping to main.
         // If the activity pauses before the queued post is drained,
