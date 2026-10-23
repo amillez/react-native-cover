@@ -159,6 +159,17 @@ open class HybridCoverSpec_cxx {
   }
   
   @inline(__always)
+  public final func setMode(mode: Int32) -> bridge.Result_void_ {
+    do {
+      try self.__implementation.setMode(mode: margelo.nitro.cover.CoverMode(rawValue: mode)!)
+      return bridge.create_Result_void_()
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_void_(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
   public final func setColor(hex: std.string) -> bridge.Result_void_ {
     do {
       try self.__implementation.setColor(hex: String(hex))

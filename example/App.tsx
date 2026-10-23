@@ -20,6 +20,11 @@ const COVER_COLORS = [
   { label: "Transparent", value: "#00000000" },
 ] as const;
 
+const COVER_MODES = [
+  { label: "Default", value: "default" as const },
+  { label: "System", value: "system" as const },
+] as const;
+
 const BLUR_STYLES = [
   { label: "Light", value: "light" as const },
   { label: "Dark", value: "dark" as const },
@@ -76,6 +81,8 @@ export default function App() {
   const [blur, setBlur] = useState<string | null>(null);
   const [blurIntensity, setBlurIntensity] = useState<number>(0.4);
   const [fade, setFade] = useState<number>(FADE_DURATIONS[1].value);
+  const [mode, setMode] =
+    useState<(typeof COVER_MODES)[number]["value"]>("default");
   const [modalVisible, setModalVisible] = useState<boolean>(false);
   const [keyboardText, setKeyboardText] = useState<string>("");
 
@@ -257,6 +264,26 @@ export default function App() {
             {enabled ? "Disable cover" : "Enable cover"}
           </Text>
         </Pressable>
+
+        <Text style={styles.section}>Mode</Text>
+        <View style={styles.chipRow}>
+          {COVER_MODES.map((option) => {
+            const selected = mode === option.value;
+            return (
+              <Pressable
+                key={option.value}
+                testID={`mode-${option.value}`}
+                onPress={() => {
+                  Cover.setMode(option.value);
+                  setMode(option.value);
+                }}
+                style={[styles.smallChip, selected && styles.chipSelected]}
+              >
+                <Text style={styles.blurLabel}>{option.label}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
 
         <Text style={styles.section}>Background color</Text>
         <View style={styles.chipRow}>

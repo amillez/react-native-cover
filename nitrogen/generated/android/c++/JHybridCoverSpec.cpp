@@ -7,6 +7,8 @@
 
 #include "JHybridCoverSpec.hpp"
 
+// Forward declaration of `CoverMode` to properly resolve imports.
+namespace margelo::nitro::cover { enum class CoverMode; }
 // Forward declaration of `CoverImageOptions` to properly resolve imports.
 namespace margelo::nitro::cover { struct CoverImageOptions; }
 // Forward declaration of `CoverResizeMode` to properly resolve imports.
@@ -20,6 +22,8 @@ namespace margelo::nitro::cover { enum class CoverBlurStyle; }
 // Forward declaration of `CoverEasing` to properly resolve imports.
 namespace margelo::nitro::cover { enum class CoverEasing; }
 
+#include "CoverMode.hpp"
+#include "JCoverMode.hpp"
 #include <string>
 #include "CoverImageOptions.hpp"
 #include "JCoverImageOptions.hpp"
@@ -84,6 +88,10 @@ namespace margelo::nitro::cover {
   void JHybridCoverSpec::disable() {
     static const auto method = _javaPart->javaClassStatic()->getMethod<void()>("disable");
     method(_javaPart);
+  }
+  void JHybridCoverSpec::setMode(CoverMode mode) {
+    static const auto method = _javaPart->javaClassStatic()->getMethod<void(jni::alias_ref<JCoverMode> /* mode */)>("setMode");
+    method(_javaPart, JCoverMode::fromCpp(mode));
   }
   void JHybridCoverSpec::setColor(const std::string& hex) {
     static const auto method = _javaPart->javaClassStatic()->getMethod<void(jni::alias_ref<jni::JString> /* hex */)>("setColor");

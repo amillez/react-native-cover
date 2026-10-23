@@ -13,6 +13,8 @@
 #error NitroModules cannot be found! Are you sure you installed NitroModules properly?
 #endif
 
+// Forward declaration of `CoverMode` to properly resolve imports.
+namespace margelo::nitro::cover { enum class CoverMode; }
 // Forward declaration of `CoverImageOptions` to properly resolve imports.
 namespace margelo::nitro::cover { struct CoverImageOptions; }
 // Forward declaration of `CoverBlurStyle` to properly resolve imports.
@@ -20,6 +22,7 @@ namespace margelo::nitro::cover { enum class CoverBlurStyle; }
 // Forward declaration of `CoverEasing` to properly resolve imports.
 namespace margelo::nitro::cover { enum class CoverEasing; }
 
+#include "CoverMode.hpp"
 #include <string>
 #include "CoverImageOptions.hpp"
 #include "CoverBlurStyle.hpp"
@@ -60,6 +63,7 @@ namespace margelo::nitro::cover {
       // Methods
       virtual void enable() = 0;
       virtual void disable() = 0;
+      virtual void setMode(CoverMode mode) = 0;
       virtual void setColor(const std::string& hex) = 0;
       virtual void setImage(const CoverImageOptions& options) = 0;
       virtual void clearImage() = 0;

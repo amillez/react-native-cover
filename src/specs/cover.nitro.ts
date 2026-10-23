@@ -24,6 +24,18 @@ export type CoverBlurStyle = "light" | "dark" | "regular" | "extraLight";
  */
 export type CoverEasing = "linear" | "easeIn" | "easeOut" | "easeInOut";
 
+/**
+ * How the cover hides the app from the App Switcher / Recents thumbnail.
+ * - `default` — a native cover view (color, image or blur) is shown when
+ *   the app leaves the foreground.
+ * - `system` — on Android 13+ (API 33), the app asks the OS not to take a
+ *   Recents screenshot at all, and the OS fills the Recents card with the
+ *   cover color. Only the color is shown: image and blur are ignored. No
+ *   cover window or broadcast receiver is installed. iOS and Android 12
+ *   and lower have no such OS mechanism and keep using `default`.
+ */
+export type CoverMode = "default" | "system";
+
 /** Horizontal anchor for positioning the image inside the cover. */
 export type CoverPositionX = "left" | "center" | "right";
 
@@ -141,6 +153,13 @@ export interface Cover
    * Idempotent.
    */
   disable(): void;
+
+  /**
+   * Choose how the cover hides the app. See `CoverMode`. Defaults to
+   * `'default'`. Can be called before or after `enable()`; while enabled,
+   * the cover switches to the new mode in place.
+   */
+  setMode(mode: CoverMode): void;
 
   /**
    * Set the background color of the cover. Accepts `#RGB`, `#RGBA`,

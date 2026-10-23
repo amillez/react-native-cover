@@ -16,6 +16,7 @@ public protocol HybridCoverSpec_protocol: HybridObject {
   // Methods
   func enable() throws -> Void
   func disable() throws -> Void
+  func setMode(mode: CoverMode) throws -> Void
   func setColor(hex: String) throws -> Void
   func setImage(options: CoverImageOptions) throws -> Void
   func clearImage() throws -> Void
