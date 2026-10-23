@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.PorterDuff
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -26,6 +27,8 @@ import android.view.Display
 import android.view.Gravity
 import android.view.SurfaceControl
 import android.view.SurfaceControlViewHost
+import android.view.Surface
+import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
@@ -215,33 +218,17 @@ class HybridCover : HybridCoverSpec() {
   @Volatile
   private var pendingUserLeaveMount: Boolean = false
 
-  /// SurfaceControl backing the cover panel's window. Captured via
-  /// reflection (see `SurfaceControlAccess`) after the first traversal
-  /// completes, so we can apply alpha=1 directly via
-  /// `SurfaceControl.Transaction` from the broadcast's HandlerThread —
-  /// no main-thread hop, no ViewRootImpl traversal in the critical
-  /// path. Cleared on detach.
-  ///
-  /// The direct setAlpha is transient: the next ViewRootImpl traversal
-  /// (whenever it fires) will re-apply the View tree's alpha to the
-  /// SurfaceControl. So the main-thread path must STILL eventually set
-  /// `view.alpha = 1` to keep them consistent — but the snapshot
-  /// race is won as soon as the direct transaction is applied at the
-  /// next SurfaceFlinger compose, which is independent of main.
-  @Volatile
-  private var coverSurfaceControl: SurfaceControl? = null
-
-  /// Tracks the last-applied SCVH alpha so animation reads / status
+  /// Tracks the last-applied reveal alpha so animation reads / status
   /// queries don't need to round-trip through SurfaceFlinger. Updated
-  /// in every `trySetScvhAlpha` and in `animateScvhAlpha`'s per-frame
+  /// in every `trySetRevealAlpha` and in `animateRevealAlpha`'s per-frame
   /// callback. Main-thread writes from animation, broadcast-thread
   /// writes from fast-show — `@Volatile` so both see consistent.
   @Volatile
-  private var scvhAlphaState: Float = 0f
+  private var revealAlphaState: Float = 0f
 
-  /// In-flight SCVH alpha animator, if any. Held so a new visibility
+  /// In-flight reveal alpha animator, if any. Held so a new visibility
   /// toggle can cancel a still-running fade before starting its own.
-  private var scvhAnimator: android.animation.ValueAnimator? = null
+  private var revealAnimator: android.animation.ValueAnimator? = null
 
   /// Re-entrance guard for `detachCoverView`. Teardown calls
   /// `WindowManager.removeViewImmediate` and `safeReleaseScvh`, both of
@@ -264,7 +251,7 @@ class HybridCover : HybridCoverSpec() {
   /// Why this matters for the snapshot race:
   ///
   ///   - On `ACTION_CLOSE_SYSTEM_DIALOGS` we call
-  ///     `SurfaceControl.Transaction().setAlpha(scvhSurfaceControl, 1f).apply()`
+  ///     `SurfaceControl.Transaction().setAlpha(revealSurfaceControl, 1f).apply()`
   ///     directly from the broadcast HandlerThread.
   ///   - The transaction goes to SurfaceFlinger and is picked up on
   ///     the very next compose — no main-thread hop, no
@@ -278,11 +265,25 @@ class HybridCover : HybridCoverSpec() {
   /// SCVH. Released in `detachCoverView`.
   private var scvhHost: SurfaceControlViewHost? = null
 
-  /// SurfaceControl owned by `scvhHost`. Captured at SCVH creation, so
-  /// it's available immediately from any thread (unlike the View-tree
-  /// SurfaceControl which needs a post-attach reflection step).
+  /// SurfaceControl the cover is revealed through: the one owned by
+  /// `scvhHost`, or on the SurfaceView path the cover SurfaceView's own.
+  /// Its buffer already holds the drawn cover, so showing it is an alpha
+  /// change that SurfaceFlinger applies on its next composition, from
+  /// any thread. Read and cleared under `revealLock`, so the broadcast
+  /// thread never applies a transaction to a control main has released.
   @Volatile
-  private var scvhSurfaceControl: SurfaceControl? = null
+  private var revealSurfaceControl: SurfaceControl? = null
+  private val revealLock = Any()
+
+  /// True while the mounted cover is a SurfaceView (API 29+, color and
+  /// image modes). Its visibility then lives only in `revealAlphaState`,
+  /// even in the gap where the surface is not created yet.
+  private var coverUsesSurface: Boolean = false
+
+  /// Fade-in requested by an animated, visible attach on the SurfaceView
+  /// path. Runs once the surface exists, since there is nothing to fade
+  /// before that.
+  private var pendingSurfaceFadeInMs: Long = 0
 
   /// Process-scoped "SCVH is known broken on this device" latch.
   ///
@@ -351,58 +352,73 @@ class HybridCover : HybridCoverSpec() {
   // MARK: - Lifecycle
 
   override fun enable() {
-    mainHandler.post {
-      if (isEnabled) return@post
-      val app = applicationOrNull() ?: return@post
-      isEnabled = true
-      // Seed the started-activity count. enable() typically runs at
-      // app startup, after the host activity's onStart already fired
-      // and before our callbacks were registered — so the bookkeeping
-      // starts at 0 even though one activity is actually started. If
-      // we left it at 0, a subsequent intra-app navigation A → B
-      // would drive the count from 0 (seed) → 1 (B's onStart) → 0
-      // (A's onStop), wrongly indicating "app backgrounded" and
-      // mounting the cover on top of B.
-      //
-      // We can't enumerate started activities from the public API, but
-      // we have a strong signal that *some* activity is started: a
-      // resolvable current activity. That covers the normal startup
-      // path. The count self-corrects from there as onStart/onStop
-      // pairs fire.
-      startedActivityCount = if (resolveActivity() != null) 1 else 0
-      val callbacks = createCallbacks()
-      lifecycleCallbacks = callbacks
-      app.registerActivityLifecycleCallbacks(callbacks)
-      registerSystemDialogReceiver(app)
-      // Pre-mount the cover invisible. The actual attach + first-frame
-      // draw happens NOW, while the activity is fully foregrounded —
-      // so when the user hits Home the recents thumbnail snapshot
-      // already includes a drawn cover surface and we just toggle
-      // alpha. Without this, addView fired from the broadcast handler
-      // frequently misses the snapshot because the snapshot is
-      // captured before the cover's first frame finishes rendering.
-      ensurePreMounted()
-    }
+    mainHandler.post { enableOnMain() }
+  }
+
+  private fun enableOnMain() {
+    if (isEnabled) return
+    val app = applicationOrNull() ?: return
+    // A JS reload creates a new HybridCover while the old one is still
+    // registered with the Application. Only one may be armed per process,
+    // or every reload would add another cover window, receiver and thread.
+    activeInstance?.get()?.takeIf { it !== this }?.disableOnMain()
+    activeInstance = WeakReference(this)
+    isEnabled = true
+    // Seed the started-activity count. enable() typically runs at
+    // app startup, after the host activity's onStart already fired
+    // and before our callbacks were registered — so the bookkeeping
+    // starts at 0 even though one activity is actually started. If
+    // we left it at 0, a subsequent intra-app navigation A → B
+    // would drive the count from 0 (seed) → 1 (B's onStart) → 0
+    // (A's onStop), wrongly indicating "app backgrounded" and
+    // mounting the cover on top of B.
+    //
+    // We can't enumerate started activities from the public API, but
+    // we have a strong signal that *some* activity is started: a
+    // resolvable current activity. That covers the normal startup
+    // path. The count self-corrects from there as onStart/onStop
+    // pairs fire.
+    startedActivityCount = if (resolveActivity() != null) 1 else 0
+    val callbacks = createCallbacks()
+    lifecycleCallbacks = callbacks
+    app.registerActivityLifecycleCallbacks(callbacks)
+    registerSystemDialogReceiver(app)
+    // Pre-mount the cover invisible. The actual attach + first-frame
+    // draw happens NOW, while the activity is fully foregrounded —
+    // so when the user hits Home the recents thumbnail snapshot
+    // already includes a drawn cover surface and we just toggle
+    // alpha. Without this, addView fired from the broadcast handler
+    // frequently misses the snapshot because the snapshot is
+    // captured before the cover's first frame finishes rendering.
+    ensurePreMounted()
+    // A disable() cancels an image that was still loading; fetch it again.
+    imageConfig?.takeIf { it.bitmap == null }?.let { loadImage(it) }
   }
 
   override fun disable() {
-    mainHandler.post {
-      if (!isEnabled) return@post
-      isEnabled = false
-      val app = applicationOrNull()
-      val callbacks = lifecycleCallbacks
-      lifecycleCallbacks = null
-      if (app != null && callbacks != null) {
-        app.unregisterActivityLifecycleCallbacks(callbacks)
-      }
-      unregisterSystemDialogReceiver(app)
-      imageLoader?.cancelInflight()
-      uninstallActivityFocusListener()
-      removeCoverImmediately()
-      // Reset so the next enable() seeds from a clean slate.
-      startedActivityCount = 0
-      pendingUserLeaveMount = false
+    mainHandler.post { disableOnMain() }
+  }
+
+  private fun disableOnMain() {
+    if (!isEnabled) return
+    isEnabled = false
+    if (activeInstance?.get() === this) activeInstance = null
+    val app = applicationOrNull()
+    val callbacks = lifecycleCallbacks
+    lifecycleCallbacks = null
+    if (app != null && callbacks != null) {
+      app.unregisterActivityLifecycleCallbacks(callbacks)
     }
+    unregisterSystemDialogReceiver(app)
+    // Each JS reload creates a new HybridCover, so a loader left running
+    // here would leak its thread once per reload.
+    imageLoader?.shutdown()
+    imageLoader = null
+    uninstallActivityFocusListener()
+    removeCoverImmediately()
+    // Reset so the next enable() seeds from a clean slate.
+    startedActivityCount = 0
+    pendingUserLeaveMount = false
   }
 
   // MARK: - Mode setters
@@ -446,22 +462,25 @@ class HybridCover : HybridCoverSpec() {
       imageConfig = config
       blurStyle = null
       refreshCoverContentIfMounted()
-      if (existing == null) {
-        // Pass the box size in pixels so the loader can downsample the
-        // decoded bitmap. `0` (cover-fills-axis) maps to "use the full
-        // screen on that axis", which the loader resolves itself.
-        val dm = (resolveActivity()?.resources ?: applicationOrNull()?.resources)
-          ?.displayMetrics
-        val density = dm?.density ?: 1f
-        val targetWPx = if (width > 0) (width * density).toInt() else 0
-        val targetHPx = if (height > 0) (height * density).toInt() else 0
-        ensureImageLoader()?.load(uri, targetWPx, targetHPx) { bitmap ->
-          val current = imageConfig
-          if (bitmap != null && current?.uri == uri) {
-            imageConfig = current.copy(bitmap = bitmap)
-            refreshCoverContentIfMounted()
-          }
-        }
+      if (existing == null) loadImage(config)
+    }
+  }
+
+  private fun loadImage(config: ImageConfig) {
+    // Pass the box size in pixels so the loader can downsample the decoded
+    // bitmap. `0` (cover-fills-axis) maps to "use the full screen on that
+    // axis", which the loader resolves itself.
+    val dm = (resolveActivity()?.resources ?: applicationOrNull()?.resources)
+      ?.displayMetrics
+    val density = dm?.density ?: 1f
+    val targetWPx = if (config.width > 0) (config.width * density).toInt() else 0
+    val targetHPx = if (config.height > 0) (config.height * density).toInt() else 0
+    val uri = config.uri
+    ensureImageLoader()?.load(uri, targetWPx, targetHPx) { bitmap ->
+      val current = imageConfig
+      if (bitmap != null && current?.uri == uri) {
+        imageConfig = current.copy(bitmap = bitmap)
+        refreshCoverContentIfMounted()
       }
     }
   }
@@ -723,87 +742,19 @@ class HybridCover : HybridCoverSpec() {
       // Fall through to legacy path on any SCVH failure.
     }
 
-    val view: View = content
+    val useSurface = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && blurStyle == null
+    val view: View = if (useSurface) buildSurfaceCoverRoot(activity, content) else content
     coverView = view
     coverHostActivityRef = WeakReference(activity)
     coverAttachedToken = targetToken
+    coverUsesSurface = useSurface
+    if (useSurface) {
+      val fade = if (animated && visible) fadeDurationMs else 0L
+      revealAlphaState = if (visible && fade == 0L) 1f else 0f
+      pendingSurfaceFadeInMs = fade
+    }
 
-    // RN's <Modal> on Android creates a separate top-level Dialog
-    // window owned by the same activity. That window has a different
-    // token than the activity's main window, and TYPE_APPLICATION_PANEL
-    // sub-windows of the activity's main window are NOT z-ordered
-    // above it. By using `topmostHostViewFor`'s result here we attach
-    // the panel as a sub-window of whichever window is on top — main
-    // activity, Modal Dialog, popup, etc.
-    //
-    // FLAG_NOT_FOCUSABLE keeps key-event routing identical (back /
-    // volume / IME continue dispatching to whatever owns input
-    // focus). FLAG_LAYOUT_IN_SCREEN + FLAG_LAYOUT_NO_LIMITS make
-    // the panel fill the full activity area including under the
-    // system bars.
-    var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-      WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-    if (!visible) {
-      // While invisible, the panel must let touches fall through to
-      // the activity. FLAG_NOT_TOUCHABLE achieves that without
-      // needing to remove the panel.
-      //
-      // FLAG_ALT_FOCUSABLE_IM, combined with FLAG_NOT_FOCUSABLE,
-      // inverts the panel's relationship with the IME: it tells
-      // WindowManager to place the panel BEHIND the soft keyboard
-      // instead of over it. Without this, the pre-mounted fullscreen
-      // panel sits above the IME's window and intercepts the IME's
-      // hit-testing for the focused TextInput beneath, so keystrokes
-      // never reach the input. We only want this while invisible —
-      // when the cover actually paints (background entry / Cover.show)
-      // it must still cover the entire screen including any
-      // lingering IME.
-      flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-        WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
-    }
-    val params = WindowManager.LayoutParams(
-      WindowManager.LayoutParams.MATCH_PARENT,
-      WindowManager.LayoutParams.MATCH_PARENT,
-      WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
-      flags,
-      PixelFormat.TRANSLUCENT,
-    )
-    params.token = targetToken
-    params.gravity = Gravity.TOP or Gravity.START
-    // Edge-to-edge: don't let the framework shrink the panel to fit
-    // around system bars or display cutouts. Without these,
-    // MATCH_PARENT resolves to the activity's content area on
-    // edge-to-edge hosts, leaving visible strips behind the status /
-    // navigation bars.
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      params.fitInsetsTypes = 0
-    }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-      params.layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-      } else {
-        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-      }
-    }
-    // Ask the OS to compose at the display's highest supported refresh
-    // rate while the cover panel is attached. Shorter vsync interval ⇒
-    // less wall-clock time between our `view.alpha = 1` and the next
-    // SurfaceFlinger compose that lands the alpha=1 buffer for the
-    // recents-thumbnail snapshot. At 120Hz the pipeline (2 vsyncs ≈
-    // 17 ms) fits inside the snapshot race window observed on tight
-    // devices; at 60Hz (33 ms) it doesn't. No-op on panels that don't
-    // support a higher rate.
-    val maxRate = activity.windowManager.defaultDisplay
-      ?.supportedModes
-      ?.maxOfOrNull { it.refreshRate }
-      ?: 0f
-    if (maxRate > 0f) {
-      params.preferredRefreshRate = maxRate
-      Log.i(TAG, "attachCover: preferredRefreshRate=$maxRate (modes=${
-        activity.windowManager.defaultDisplay?.supportedModes?.joinToString { "${it.refreshRate}Hz" }
-      })")
-    }
+    val params = buildCoverWindowParams(activity, targetToken, visible)
 
     try {
       activity.windowManager.addView(view, params)
@@ -812,20 +763,13 @@ class HybridCover : HybridCoverSpec() {
       coverView = null
       coverHostActivityRef = null
       coverAttachedToken = null
+      coverUsesSurface = false
       return
     }
 
-    // Capture the SurfaceControl once ViewRootImpl has wired one up.
-    // The first traversal/layout has to complete before
-    // ViewRootImpl.mSurfaceControl is set — using `view.post` runs
-    // the resolver on the next main-thread tick, which is after the
-    // first vsync/traversal kicked off by addView. Re-runs on every
-    // attach because each addView creates a new ViewRootImpl with its
-    // own SurfaceControl.
-    view.post {
-      if (coverView !== view) return@post  // Detached / re-attached since.
-      coverSurfaceControl = SurfaceControlAccess.getSurfaceControl(view)
-      Log.i(TAG, "attachCover: SurfaceControl captured=${coverSurfaceControl != null}")
+    if (useSurface) {
+      if (visible) isVisible = true
+      return
     }
 
     // Run the animation after the addView so the surface is hooked up.
@@ -1014,7 +958,7 @@ class HybridCover : HybridCoverSpec() {
     coverHostActivityRef = WeakReference(activity)
     coverAttachedToken = targetToken
     scvhHost = host
-    scvhSurfaceControl = sc
+    synchronized(revealLock) { revealSurfaceControl = sc }
 
     if (visible) isVisible = true
     Log.i(TAG, "attachCover scvh: attached size=${width}x${height} visible=$visible sc=ok")
@@ -1170,10 +1114,25 @@ class HybridCover : HybridCoverSpec() {
     targetToken: IBinder,
     visible: Boolean,
   ): WindowManager.LayoutParams {
+    // RN's <Modal> on Android creates a separate top-level Dialog
+    // window owned by the same activity. TYPE_APPLICATION_PANEL
+    // sub-windows of the activity's main window are NOT z-ordered above
+    // it, so callers pass the token of whichever window is on top (see
+    // `topmostHostViewFor`).
+    //
+    // FLAG_NOT_FOCUSABLE keeps key-event routing identical (back /
+    // volume / IME continue dispatching to whatever owns input focus).
+    // FLAG_LAYOUT_IN_SCREEN + FLAG_LAYOUT_NO_LIMITS make the panel fill
+    // the full activity area including under the system bars.
     var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
       WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
       WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
     if (!visible) {
+      // While invisible the panel lets touches fall through
+      // (FLAG_NOT_TOUCHABLE) and sits behind the soft keyboard
+      // (FLAG_ALT_FOCUSABLE_IM with FLAG_NOT_FOCUSABLE). Without the
+      // second flag the fullscreen panel sits above the IME and swallows
+      // its hit-testing, so keystrokes never reach the focused input.
       flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
         WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
     }
@@ -1186,6 +1145,9 @@ class HybridCover : HybridCoverSpec() {
     )
     params.token = targetToken
     params.gravity = Gravity.TOP or Gravity.START
+    // Edge-to-edge: don't let the framework shrink the panel to fit
+    // around system bars or display cutouts, which would leave visible
+    // strips behind the status and navigation bars.
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
       params.fitInsetsTypes = 0
     }
@@ -1195,13 +1157,6 @@ class HybridCover : HybridCoverSpec() {
       } else {
         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
       }
-    }
-    val maxRate = activity.windowManager.defaultDisplay
-      ?.supportedModes
-      ?.maxOfOrNull { it.refreshRate }
-      ?: 0f
-    if (maxRate > 0f) {
-      params.preferredRefreshRate = maxRate
     }
     return params
   }
@@ -1214,17 +1169,19 @@ class HybridCover : HybridCoverSpec() {
   /// applied. Callers should fall back to the View-tree alpha path
   /// when this returns false (e.g. legacy attach, pre-API-30, or
   /// SCVH creation failed earlier).
-  private fun trySetScvhAlpha(alpha: Float): Boolean {
-    val sc = scvhSurfaceControl ?: return false
-    return try {
-      SurfaceControl.Transaction()
-        .setAlpha(sc, alpha)
-        .apply()
-      scvhAlphaState = alpha
-      true
-    } catch (e: Throwable) {
-      Log.w(TAG, "trySetScvhAlpha($alpha) failed: $e")
-      false
+  private fun trySetRevealAlpha(alpha: Float): Boolean {
+    synchronized(revealLock) {
+      val sc = revealSurfaceControl ?: return false
+      return try {
+        SurfaceControl.Transaction()
+          .setAlpha(sc, alpha)
+          .apply()
+        revealAlphaState = alpha
+        true
+      } catch (e: Throwable) {
+        Log.w(TAG, "trySetRevealAlpha($alpha) failed: $e")
+        false
+      }
     }
   }
 
@@ -1232,33 +1189,32 @@ class HybridCover : HybridCoverSpec() {
   /// over `duration`. Uses a ValueAnimator + per-frame
   /// `SurfaceControl.Transaction` (one binder per ~16 ms). Runs on
   /// main; cancels any in-flight animation before starting.
-  private fun animateScvhAlpha(sc: SurfaceControl, target: Float, duration: Long) {
-    scvhAnimator?.cancel()
-    val from = scvhAlphaState
+  private fun animateRevealAlpha(target: Float, duration: Long) {
+    revealAnimator?.cancel()
+    val from = revealAlphaState
     if (from == target) return
     val animator = android.animation.ValueAnimator.ofFloat(from, target).apply {
       this.duration = duration
       interpolator = fadeInterpolator
       addUpdateListener { va ->
         val a = va.animatedValue as Float
-        try {
-          SurfaceControl.Transaction().setAlpha(sc, a).apply()
-          scvhAlphaState = a
-        } catch (_: Throwable) {
-          // Surface gone mid-animation — just stop trying.
+        if (!trySetRevealAlpha(a)) {
+          // Surface gone mid-animation. Record where it was heading so a
+          // recreated surface comes back in the end state.
+          revealAlphaState = target
           cancel()
         }
       }
       addListener(object : AnimatorListenerAdapter() {
         override fun onAnimationEnd(animation: Animator) {
-          if (scvhAnimator === this@apply) scvhAnimator = null
+          if (revealAnimator === this@apply) revealAnimator = null
         }
         override fun onAnimationCancel(animation: Animator) {
-          if (scvhAnimator === this@apply) scvhAnimator = null
+          if (revealAnimator === this@apply) revealAnimator = null
         }
       })
     }
-    scvhAnimator = animator
+    revealAnimator = animator
     animator.start()
   }
 
@@ -1271,8 +1227,8 @@ class HybridCover : HybridCoverSpec() {
     val view = coverView ?: return
     val activity = coverHostActivityRef?.get() ?: return
     val params = view.layoutParams as? WindowManager.LayoutParams ?: return
-    val scvh = scvhSurfaceControl
-    Log.i(TAG, "setCoverVisibility: visible=$visible animated=$animated scvh=${scvh != null} t=${SystemClock.uptimeMillis()}")
+    val sc = revealSurfaceControl
+    Log.i(TAG, "setCoverVisibility: visible=$visible animated=$animated sc=${sc != null} surface=$coverUsesSurface t=${SystemClock.uptimeMillis()}")
 
     // Blur mode: re-capture the underlying surface so the bitmap
     // reflects the activity's *current* contents and not a stale
@@ -1282,7 +1238,7 @@ class HybridCover : HybridCoverSpec() {
     val duration = if (animated) fadeDurationMs else 0L
     val target = if (visible) 1f else 0f
 
-    if (scvh != null) {
+    if (sc != null || coverUsesSurface) {
       // SCVH fast path: SurfaceControl alpha via Transaction. Skips
       // the View-tree → ViewRootImpl traversal → next-vsync chain
       // entirely. The transaction is applied at the next
@@ -1291,11 +1247,13 @@ class HybridCover : HybridCoverSpec() {
       // what gives us the deterministic win over the legacy
       // view.alpha path on devices where reflection is blocked and
       // the snapshot fires inside the first vsync after onPause.
-      if (duration > 0 && scvhAlphaState != target) {
-        animateScvhAlpha(scvh, target, duration)
+      pendingSurfaceFadeInMs = 0
+      if (duration > 0 && sc != null && revealAlphaState != target) {
+        animateRevealAlpha(target, duration)
       } else {
-        scvhAnimator?.cancel()
-        trySetScvhAlpha(target)
+        revealAnimator?.cancel()
+        revealAlphaState = target
+        trySetRevealAlpha(target)
       }
     } else {
       // Legacy path: View.alpha on the cover Window's root view.
@@ -1418,6 +1376,13 @@ class HybridCover : HybridCoverSpec() {
         return
       }
       val view = coverView ?: return
+      if (coverUsesSurface || revealSurfaceControl != null) {
+        setCoverVisibility(visible = false, animated = true)
+        mainHandler.postDelayed({
+          if (coverView === view && !isVisible) removeCoverImmediately()
+        }, fadeDurationMs)
+        return
+      }
       view.animate().cancel()
       view.animate()
         .alpha(0f)
@@ -1535,8 +1500,8 @@ class HybridCover : HybridCoverSpec() {
       // (the view is being discarded anyway).
       (content as? FreezableFrameLayout)?.frozen = true
 
-      scvhAnimator?.cancel()
-      scvhAnimator = null
+      revealAnimator?.cancel()
+      revealAnimator = null
       view.animate().cancel()
       view.animate().setListener(null)
 
@@ -1546,10 +1511,11 @@ class HybridCover : HybridCoverSpec() {
       coverContent = null
       coverHostActivityRef = null
       coverAttachedToken = null
-      coverSurfaceControl = null
       scvhHost = null
-      scvhSurfaceControl = null
-      scvhAlphaState = 0f
+      synchronized(revealLock) { revealSurfaceControl = null }
+      revealAlphaState = 0f
+      coverUsesSurface = false
+      pendingSurfaceFadeInMs = 0
 
       // Cancel pending traversals on the SCVH's internal ViewRootImpl
       // BEFORE removing the enclosing SurfaceView. Removing the parent
@@ -1570,7 +1536,12 @@ class HybridCover : HybridCoverSpec() {
       // where immediate removal throws (some Samsung / MIUI builds
       // reject removeViewImmediate when the view is in a transitional
       // state).
-      if (view.windowToken != null) {
+      //
+      // `parent` is set by addView itself, while `windowToken` only arrives
+      // with the first traversal. Checking the token skipped windows that
+      // were added and replaced within one frame, such as a burst of
+      // setColor calls, and each one stayed attached for good.
+      if (view.parent != null) {
         val removed = try {
           activity?.windowManager?.removeViewImmediate(view)
           true
@@ -1756,28 +1727,6 @@ class HybridCover : HybridCoverSpec() {
     }
   }
 
-  /// Apply alpha to the cover's `SurfaceControl` directly via a
-  /// `Transaction`, bypassing the View pipeline entirely. Safe to call
-  /// from ANY thread (Transaction.apply is thread-safe).
-  ///
-  /// Returns true if a transaction was applied. The next SurfaceFlinger
-  /// compose will reflect the new alpha — independent of whether the
-  /// RN main thread is busy or when ViewRootImpl next traverses. False
-  /// if the SC isn't captured yet (pre-first-frame, or reflection
-  /// disabled) — caller falls back to the View-tree path.
-  private fun trySetSurfaceAlphaFast(alpha: Float): Boolean {
-    val sc = coverSurfaceControl ?: return false
-    return try {
-      SurfaceControl.Transaction()
-        .setAlpha(sc, alpha)
-        .apply()
-      true
-    } catch (e: Throwable) {
-      Log.w(TAG, "trySetSurfaceAlphaFast failed: $e")
-      false
-    }
-  }
-
   private fun refreshCoverContentIfMounted() {
     val activity = coverHostActivityRef?.get() ?: return
     if (coverView == null) return
@@ -1861,6 +1810,122 @@ class HybridCover : HybridCoverSpec() {
     return container
   }
 
+  /// Window root for the SurfaceView path: a touch-swallowing container
+  /// holding an empty SurfaceView. The cover is drawn into a child
+  /// SurfaceControl parented to the SurfaceView's, so its alpha is ours
+  /// alone. Android 12+ writes the SurfaceView's view alpha onto the
+  /// SurfaceView's own control whenever it updates, which would undo a
+  /// hidden state set there. `content` is never attached; it is laid out
+  /// offscreen and drawn once per surface, so revealing the cover needs
+  /// no app frame.
+  private fun buildSurfaceCoverRoot(activity: Activity, content: View): View {
+    val surfaceView = SurfaceView(activity).apply {
+      setZOrderOnTop(true)
+      holder.setFormat(PixelFormat.TRANSLUCENT)
+    }
+    surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+      private var child: SurfaceControl? = null
+
+      override fun surfaceCreated(holder: SurfaceHolder) {}
+
+      override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (coverContent !== content) return
+        val next = try {
+          SurfaceControl.Builder()
+            .setName("react-native-cover")
+            .setParent(surfaceView.surfaceControl)
+            .setBufferSize(width, height)
+            .setFormat(PixelFormat.TRANSLUCENT)
+            .setOpaque(false)
+            .build()
+        } catch (e: Throwable) {
+          Log.w(TAG, "surface cover: child SurfaceControl failed: $e")
+          return
+        }
+        // Visibility and alpha go in before the first buffer, so a hidden
+        // cover never shows for a frame.
+        SurfaceControl.Transaction()
+          .setVisibility(next, true)
+          .setAlpha(next, revealAlphaState)
+          .apply()
+        drawCoverContent(next, content, width, height)
+        val previous = synchronized(revealLock) {
+          // The receiver may have revealed the old layer while this one was
+          // drawn. Carry its latest alpha over before publishing.
+          SurfaceControl.Transaction().setAlpha(next, revealAlphaState).apply()
+          val old = child
+          child = next
+          revealSurfaceControl = next
+          old
+        }
+        previous?.let { removeSurface(it) }
+        val fade = pendingSurfaceFadeInMs
+        if (fade > 0) {
+          pendingSurfaceFadeInMs = 0
+          animateRevealAlpha(1f, fade)
+        }
+      }
+
+      override fun surfaceDestroyed(holder: SurfaceHolder) {
+        val old = synchronized(revealLock) {
+          val c = child
+          if (revealSurfaceControl === c) revealSurfaceControl = null
+          child = null
+          c
+        }
+        old?.let { removeSurface(it) }
+      }
+    })
+    return FreezableFrameLayout(activity).apply {
+      isClickable = true
+      isFocusable = true
+      contentDescription = COVER_LABEL
+      tag = COVER_TAG
+      importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+      setOnTouchListener { _, _ -> true }
+      addView(
+        surfaceView,
+        FrameLayout.LayoutParams(
+          FrameLayout.LayoutParams.MATCH_PARENT,
+          FrameLayout.LayoutParams.MATCH_PARENT,
+        ),
+      )
+    }
+  }
+
+  // release() only drops our reference: the layer stays on screen while its
+  // parent lives, so it is detached first.
+  private fun removeSurface(control: SurfaceControl) {
+    try {
+      SurfaceControl.Transaction().reparent(control, null).apply()
+    } catch (e: Throwable) {
+      Log.w(TAG, "removeSurface: reparent failed: $e")
+    }
+    control.release()
+  }
+
+  private fun drawCoverContent(target: SurfaceControl, content: View, width: Int, height: Int) {
+    content.measure(
+      View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+      View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
+    )
+    content.layout(0, 0, width, height)
+    val surface = Surface(target)
+    try {
+      val canvas = surface.lockHardwareCanvas()
+      try {
+        canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        content.draw(canvas)
+      } finally {
+        surface.unlockCanvasAndPost(canvas)
+      }
+    } catch (e: Throwable) {
+      Log.w(TAG, "drawCoverContent failed: $e")
+    } finally {
+      surface.release()
+    }
+  }
+
   private fun computeGravity(
     x: CoverPositionX,
     y: CoverPositionY,
@@ -1905,6 +1970,11 @@ class HybridCover : HybridCoverSpec() {
 
       override fun onActivityResumed(activity: Activity) {
         currentActivityRef = WeakReference(activity)
+        // Home and Recents often send the leave broadcast twice, and the
+        // second one re-arms the flag after the cover is already up. Left
+        // set, it would mount the cover on the next pause that has no
+        // broadcast, such as a runtime permission dialog.
+        pendingUserLeaveMount = false
         // Window's decor is guaranteed attached by onResume; if
         // pre-mount missed it on Started (token was null), retry.
         ensurePreMounted()
@@ -2015,7 +2085,7 @@ class HybridCover : HybridCoverSpec() {
         if (intent.action != Intent.ACTION_CLOSE_SYSTEM_DIALOGS) return
         val reason = intent.getStringExtra(SYSTEM_DIALOG_REASON_KEY)
         val recvAt = SystemClock.uptimeMillis()
-        Log.i(TAG, "broadcast: reason=$reason isEnabled=$isEnabled isVisible=$isVisible sc=${coverSurfaceControl != null} t=$recvAt")
+        Log.i(TAG, "broadcast: reason=$reason isEnabled=$isEnabled isVisible=$isVisible t=$recvAt")
         if (reason !in USER_LEAVE_REASONS) return
         if (!isEnabled) return
 
@@ -2024,18 +2094,9 @@ class HybridCover : HybridCoverSpec() {
         // transactions are thread-safe, atomic at the next
         // SurfaceFlinger compose, and require no main-thread hop —
         // so this lands before the recents-thumbnail snapshot
-        // regardless of how busy the RN main thread is. Two
-        // possible SCs:
-        //   - `scvhSurfaceControl`: from `SurfaceControlViewHost`
-        //     (API 30+, public API, no reflection required). This
-        //     is the preferred path.
-        //   - `coverSurfaceControl`: reflectively captured from
-        //     ViewRootImpl. Subject to hidden-API enforcement;
-        //     fails on many shipping devices. Kept as a
-        //     belt-and-suspenders fallback.
-        val scvhApplied = trySetScvhAlpha(1f)
-        val coverApplied = if (!scvhApplied) trySetSurfaceAlphaFast(1f) else false
-        Log.i(TAG, "broadcast: fast scvh=$scvhApplied refl=$coverApplied dt=${SystemClock.uptimeMillis() - recvAt}ms")
+        // regardless of how busy the RN main thread is.
+        val revealed = trySetRevealAlpha(1f)
+        Log.i(TAG, "broadcast: fast=$revealed dt=${SystemClock.uptimeMillis() - recvAt}ms")
 
         // Arm the synchronous-onPause path *before* hopping to main.
         // If the activity pauses before the queued post is drained,
@@ -2103,6 +2164,9 @@ class HybridCover : HybridCoverSpec() {
     currentActivityRef?.get() ?: NitroModules.applicationContext?.currentActivity
 
   companion object {
+    // Main-thread only.
+    private var activeInstance: WeakReference<HybridCover>? = null
+
     private const val TAG = "Cover"
     private const val COVER_TAG = "CoverOverlay"
     private const val COVER_LABEL = "Privacy cover"

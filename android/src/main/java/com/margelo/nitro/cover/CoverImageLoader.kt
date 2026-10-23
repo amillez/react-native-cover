@@ -49,6 +49,11 @@ internal class CoverImageLoader(private val applicationContext: Context) {
     }
   }
 
+  fun shutdown() {
+    cancelInflight()
+    executor.shutdownNow()
+  }
+
   /// Load an image and downsample it to fit the target box. Pass
   /// `targetWidthPx`/`targetHeightPx <= 0` for "use full screen size"
   /// — the cover is always full-screen, so the screen is the natural

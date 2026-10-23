@@ -214,7 +214,9 @@ import type { CoverModule } from "react-native-cover";
     -   `onActivityStopped` (backup signal for devices with flaky broadcast delivery) → mounts the cover too
     -   The topmost-host window's focus regain (observed via `ViewTreeObserver.OnWindowFocusChangeListener`) → fade the container out and detach
 -   The cover is added as a separate window (rather than as a child of the activity's `decorView`) so it sits **above** any React Native `Modal` — RN Modals are Dialogs at z-layer 2, while `TYPE_APPLICATION_PANEL` is at z-layer 1000. The window is `FLAG_NOT_FOCUSABLE` so it doesn't steal input focus from a Modal underneath; it still consumes touches via the cover's own `OnTouchListener`.
--   The cover is **pre-mounted** invisible (alpha=0 + `FLAG_NOT_TOUCHABLE`) the moment it's enabled. The home/recents broadcast then becomes a fast property toggle — no `addView`, no first-frame race against the OS thumbnail capture.
+-   The cover is **pre-mounted** invisible (`FLAG_NOT_TOUCHABLE`) the moment it's enabled, so the home/recents broadcast never has to add a window.
+-   On API 29+ (except blur mode) the cover window holds an empty `SurfaceView` with a child `SurfaceControl` of the library's own. The cover is drawn into that control once, while the app is in front, at alpha 0. The broadcast reveals it by setting the control's alpha to 1 straight from the receiver thread. SurfaceFlinger applies that on its next composition, so the reveal does not wait for the app's main thread to draw a frame, and the hidden cover is not composited.
+-   On API 24–28, and in blur mode on every version, the reveal sets the container's `View` alpha instead. Blur mode re-captures the screen each time it shows, so it cannot be drawn ahead of time.
 -   The container is rebuilt from the current `(color, image?, blur?)` state every time it mounts:
     -   `blur` set → an `ImageView` filled with a 1/4-scale snapshot of the topmost host window (so a foreground Modal's content is also obscured), blurred via `RenderEffect.createBlurEffect` (API 31+) or degraded to a tinted translucent background on older Android.
     -   otherwise → container's background is the color; if an image is set, an `ImageView` is added as a child with a `LayoutParams(w, h, gravity)` computed from `width` / `height` (DIP-converted) and `x` / `y`.
@@ -232,9 +234,13 @@ Android does not have a direct equivalent in `Application.ActivityLifecycleCallb
 
 ### Android: known limitations
 
--   The `reason` extras on `ACTION_CLOSE_SYSTEM_DIALOGS` come from `PhoneWindowManager` and have been stable across AOSP releases, but they are not part of the public Android SDK contract. An OEM that ships a custom variant of `PhoneWindowManager` could in principle omit or rename them. We have not seen this in practice on shipping devices.
--   Topmost-window discovery (used to attach the cover above an open `<Modal>` Dialog and to capture the right surface for blur) reads the per-process `WindowManagerGlobal.mViews` list via reflection. The greylist allows this on every shipping Android version we test, but it could be tightened in a future release. We fall back to the activity's own decor view if the reflection fails.
--   Like iOS's `didEnterBackground`, this signal does not fire for non-user-initiated background transitions: incoming phone calls, foreground services taking over the screen, programmatic `startActivity` to another app. The cover will not appear in the Recents thumbnail in those cases. This matches the iOS behavior — a deliberate trade-off versus the modal-flash that reacting to every focus loss would cause.
+These apply to the cover on Android.
+
+-   **The cover only reacts to Home, Recents and Assist.** It mounts on the `ACTION_CLOSE_SYSTEM_DIALOGS` broadcast for those keys and gestures, with `onActivityStopped` as a backup. Any other way of leaving the app has no early signal. Examples are opening another app from inside yours (a share target, an external link, a browser), the screen turning off, an incoming call, and a programmatic `startActivity` to another app. In those cases Android takes the Recents screenshot before `onActivityStopped`, so the thumbnail can show your app's content. iOS does not have this gap, because any switch to another app backgrounds yours and fires `applicationDidEnterBackground`.
+-   **On API 24–28 and in blur mode the reveal still needs an app frame.** The cover becomes visible only after the main thread draws it, so a busy main thread can lose the race with the Recents screenshot.
+-   **The `reason` extras are not public API.** The `reason` values on `ACTION_CLOSE_SYSTEM_DIALOGS` come from `PhoneWindowManager` and have been stable across AOSP releases, but they are not part of the public Android SDK contract. An OEM that ships a custom variant of `PhoneWindowManager` could in principle omit or rename them. We have not seen this in practice on shipping devices.
+-   **Topmost-window discovery uses reflection.** It attaches the cover above an open `<Modal>` Dialog and captures the right surface for blur, by reading the per-process `WindowManagerGlobal.mViews` list. The greylist allows this on every shipping Android version we test, but it could be tightened in a future release. If the reflection fails, the cover falls back to the activity's own window and paints under an open `<Modal>`.
+-   **A cover window stays attached while the cover is enabled.** It is invisible and lets touches and the keyboard through. On API 29+ it is not composited while hidden.
 
 ## Contributing
 
